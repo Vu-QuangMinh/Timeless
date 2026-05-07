@@ -58,6 +58,8 @@ var _menu_layer: CanvasLayer
 var _chest_locked: bool    = true
 var _chest_picked_up: bool = false
 var _predict_downed: Array[PlayerCharacter] = []
+# guard_id → is_neutralized state at the start of the current planning phase (post-commit)
+var _guards_neutralized_baseline: Dictionary = {}
 
 func _ready() -> void:
 	_setup_camera()
@@ -153,6 +155,9 @@ func _on_phase_changed_main(phase: GameManager.Phase) -> void:
 		_run_predict()
 
 func _on_turn_started(_turn_number: int) -> void:
+	# Snapshot guard neutralization state so undo/reset can restore to this baseline.
+	for g in _guards:
+		_guards_neutralized_baseline[g.guard_id] = g.is_neutralized
 	for ch in _characters:
 		ch.on_new_turn()
 	_hud.update_selected_character(_selected_char())
@@ -231,6 +236,26 @@ func _guard_nearest_target(guard: Guard) -> PlayerCharacter:
 			nearest   = ch
 	return nearest
 
+## Recompute every guard's is_neutralized from scratch:
+## start from the committed baseline, then re-apply any takedowns in the current planning queues.
+## Call after any queue/undo/reset that involves a takedown action.
+func _recompute_guard_neutralizations() -> void:
+	for g in _guards:
+		g.is_neutralized = _guards_neutralized_baseline.get(g.guard_id, false)
+	for ch in _characters:
+		if ch.is_taken_down:
+			continue
+		for action in ch.get_queued_actions():
+			var td := action as ActionTakedown
+			if td == null:
+				continue
+			for g in _guards:
+				if g.guard_id == td.target_id:
+					g.is_neutralized = true
+					break
+	for g in _guards:
+		g.queue_redraw()
+
 func _anyone_holding_hostage() -> bool:
 	for ch in _characters:
 		for entry in ActionQueue.get_queue(ch.character_id):
@@ -291,9 +316,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				_cycle_selection()
 			KEY_QUOTELEFT:
 				_selected_char().undo_last_action()
+				_recompute_guard_neutralizations()
 			KEY_R:
 				for ch in _characters:
 					ch.reset_turn_actions()
+				_recompute_guard_neutralizations()
 				_hud.update_selected_character(_selected_char())
 
 	elif event is InputEventMouseButton and event.pressed:
@@ -575,6 +602,7 @@ func _on_action_selected(action_type: String, data: Dictionary) -> void:
 			action.enemy_type     = data.get("enemy_type", "guard")
 			action.target_id      = data.get("guard_id", -1)
 			sel.queue_action(action)
+			_recompute_guard_neutralizations()
 
 		"hold_hostage":
 			var action            := ActionHoldHostage.new()
@@ -628,6 +656,7 @@ func _on_action_selected(action_type: String, data: Dictionary) -> void:
 			action.enemy_type     = data.get("enemy_type", "guard")
 			action.target_id      = data.get("guard_id", -1)
 			sel.queue_actions([move, action])
+			_recompute_guard_neutralizations()
 
 		"move_hold_hostage":
 			var path: MovePath = data.get("path")

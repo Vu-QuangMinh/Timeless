@@ -86,7 +86,11 @@ func deselect() -> void:
 func get_turn_time_remaining() -> float:
 	return TURN_BUDGET - ActionQueue.get_time_used(character_id)
 
-## Mark this character as taken down: clears their plan, freezes visuals, blocks future actions.
+func get_queued_actions() -> Array[ActionBase]:
+	return _action_objects
+
+## Mark this character as taken down: freezes visuals and blocks future actions.
+## Does NOT clear _action_objects so restore_from_predict() can replay planning animations on Back.
 func take_down() -> void:
 	if is_taken_down:
 		return
@@ -94,8 +98,6 @@ func take_down() -> void:
 	if _move_tween:
 		_move_tween.kill()
 		_move_tween = null
-	_action_objects.clear()
-	ActionQueue.reset_character(character_id)
 	position = logical_pos
 	scale    = Vector2.ONE
 	queue_redraw()
