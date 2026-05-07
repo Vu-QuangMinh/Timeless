@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://pathprev0001"]
+
+[ext_resource type="Script" path="res://scripts/ui/path_preview.gd" id="1_pathprev"]
+
+[node name="PathPreview" type="Node2D"]
+script = ExtResource("1_pathprev")
+z_index = 10
