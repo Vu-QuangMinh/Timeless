@@ -1,0 +1,17 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3]
+
+[ext_resource type="Shader" path="res://scripts/cone_beam.gdshader" id="1_shader"]
+
+[resource]
+shader = ExtResource("1_shader")
+shader_parameter/cone_color = Color(1, 0.18, 0.18, 1)
+shader_parameter/intensity = 1.0
+shader_parameter/fill_alpha = 0.0
+shader_parameter/border_alpha = 3.0
+shader_parameter/border_width = 0.05
+shader_parameter/far_edge_alpha = 2.5
+shader_parameter/far_edge_width = 0.04
+shader_parameter/length_attenuation = 0.0
+shader_parameter/scan_speed = 0.0
+shader_parameter/scan_intensity = 0.0
+shader_parameter/scan_frequency = 12.0

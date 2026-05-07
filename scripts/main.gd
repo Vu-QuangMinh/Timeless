@@ -7,7 +7,7 @@
 extends Node2D
 
 const PlayerCharScene  := preload("res://scenes/characters/player_character.tscn")
-const TestMapScene     := preload("res://scenes/test_map/test_map.tscn")
+const TestMapScene     := preload("res://scenes/level_1/level_1.tscn")
 const HUDScene         := preload("res://scenes/ui/hud.tscn")
 const ContextMenuScene := preload("res://scenes/ui/context_menu.tscn")
 const PathPreviewScene := preload("res://scenes/ui/path_preview.tscn")
@@ -50,7 +50,7 @@ var _characters: Array[PlayerCharacter] = []
 var _guards: Array[Guard] = []
 var _selected_index: int = 0
 var _hud: HUD
-var _map: TestMap
+var _map: Node2D
 var _context_menu: ContextMenu
 var _path_preview: PathPreview
 var _menu_layer: CanvasLayer
@@ -80,6 +80,7 @@ func _ready() -> void:
 
 func _setup_camera() -> void:
 	var cam := Camera2D.new()
+	cam.set_script(preload("res://scripts/camera_zoom.gd"))
 	cam.zoom = Vector2(0.9, 0.9)
 	add_child(cam)
 
@@ -95,9 +96,18 @@ func _spawn_characters() -> void:
 		var ch: PlayerCharacter = PlayerCharScene.instantiate()
 		ch.character_id    = i
 		ch.character_class = SPAWN_CLASSES[i]
-		ch.position        = SPAWN_POSITIONS[i]
+		if SPAWN_CLASSES[i] == Character.CharacterClass.HACKER:
+			ch.position = _iso_project(Vector3(1, 141, 0))
+		else:
+			ch.position = SPAWN_POSITIONS[i]
 		chars_node.add_child(ch)
 		_characters.append(ch)
+
+
+func _iso_project(p: Vector3) -> Vector2:
+	const COS30 := 0.8660254
+	const SIN30 := 0.5
+	return Vector2((p.x + p.y) * COS30, (p.x - p.y) * SIN30 - p.z)
 
 func _spawn_guards() -> void:
 	var guards_node := Node2D.new()

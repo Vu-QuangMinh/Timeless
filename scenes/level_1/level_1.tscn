@@ -1,0 +1,102 @@
+[gd_scene load_steps=13 format=3 uid="uid://dmmq7veq2embh"]
+
+[ext_resource type="CanvasTexture" path="res://assets/level1/Door.tres" id="2_igcjm"]
+[ext_resource type="Script" uid="uid://owlxhuxpmhe2" path="res://scripts/EditMode.gd" id="3_jr17i"]
+[ext_resource type="Script" path="res://scripts/light_mode.gd" id="9_lmode"]
+[ext_resource type="Script" path="res://scenes/level_1/level_1.gd" id="4_lvl1"]
+[ext_resource type="Script" path="res://scripts/camera_zoom.gd" id="5_camz"]
+[ext_resource type="CanvasTexture" path="res://assets/level1/Floor.tres" id="6_floor"]
+[ext_resource type="CanvasTexture" path="res://assets/level1/Wall_X.tres" id="7_wallx"]
+[ext_resource type="CanvasTexture" path="res://assets/level1/Wall_Y.tres" id="8_wally"]
+[ext_resource type="Texture2D" path="res://assets/level1/CCTV.png" id="10_cctv"]
+[ext_resource type="Texture2D" path="res://assets/artifacts/Painting_3.png" id="14_p3"]
+[ext_resource type="Texture2D" path="res://assets/security/Laser_sensor.png" id="15_laser"]
+[ext_resource type="Texture2D" path="res://assets/level1/cctv_cone_light.png" id="13_cone_tex"]
+[ext_resource type="ShaderMaterial" path="res://assets/level1/cctv_cone_mat.tres" id="11_cone_mat"]
+[ext_resource type="Script" path="res://scripts/cctv_pan.gd" id="12_pan"]
+[ext_resource type="ShaderMaterial" path="res://assets/level1/cctv_cone_mat.tres" id="16_unused_laser"]
+[ext_resource type="Texture2D" path="res://assets/level1/point_light_radial.tres" id="17_rad"]
+[ext_resource type="Script" path="res://scripts/laser_glow.gd" id="19_laser_glow"]
+
+[node name="Level1" type="Node2D" unique_id=1854221604]
+script = ExtResource("4_lvl1")
+
+[node name="Background" type="Node2D" parent="." unique_id=1506203584]
+
+[node name="Floor" type="Sprite2D" parent="Background" groups=["editable"]]
+scale = Vector2(0.5307, 0.5307)
+texture = ExtResource("6_floor")
+
+[node name="Wall_X" type="Sprite2D" parent="Background" groups=["editable"]]
+scale = Vector2(0.5307, 0.5307)
+texture = ExtResource("7_wallx")
+
+[node name="Wall_Y" type="Sprite2D" parent="Background" groups=["editable"]]
+scale = Vector2(0.5307, 0.5307)
+texture = ExtResource("8_wally")
+
+[node name="Objects" type="Node2D" parent="." unique_id=1216357741]
+y_sort_enabled = true
+
+[node name="Door" type="Sprite2D" parent="Objects" unique_id=1311275994 groups=["editable"]]
+scale = Vector2(0.4327, 0.4327)
+texture = ExtResource("2_igcjm")
+
+[node name="CCTV" type="Sprite2D" parent="Objects" groups=["editable"]]
+position = Vector2(200, -200)
+scale = Vector2(0.6, 0.6)
+texture = ExtResource("10_cctv")
+
+[node name="Painting_3" type="Sprite2D" parent="Objects" groups=["editable"]]
+position = Vector2(0, -150)
+scale = Vector2(0.5, 0.5)
+texture = ExtResource("14_p3")
+
+[node name="Laser_sensor" type="Sprite2D" parent="Objects" groups=["editable"]]
+position = Vector2(-200, -100)
+texture = ExtResource("15_laser")
+
+[node name="Lighting" type="Node2D" parent="." unique_id=1408295547]
+
+[node name="SunY" type="DirectionalLight2D" parent="Lighting"]
+position = Vector2(0, 0)
+rotation = -0.5235988
+height = 1.0
+energy = 1.2
+color = Color(1, 0.96, 0.88, 1)
+
+[node name="CCTV_Light" type="PointLight2D" parent="Lighting"]
+position = Vector2(200, -180)
+texture = ExtResource("13_cone_tex")
+color = Color(1, 0.18, 0.18, 1)
+energy = 1.5
+texture_scale = 1.0
+height = 0.5
+script = ExtResource("12_pan")
+pan_amplitude_deg = 30.0
+pan_period_sec = 4.0
+
+[node name="ConeBeam" type="Polygon2D" parent="Lighting/CCTV_Light"]
+z_index = 100
+light_mask = 0
+material = ExtResource("11_cone_mat")
+polygon = PackedVector2Array(0, 0, -120, 320, 120, 320)
+uv = PackedVector2Array(0.5, 0, 0, 1, 1, 1)
+
+[node name="Laser" type="PointLight2D" parent="Lighting"]
+position = Vector2(-300, -100)
+color = Color(1, 0.2, 0.2, 1)
+energy = 1.0
+
+[node name="LaserBeam" type="Node2D" parent="Lighting/Laser"]
+z_index = 100
+script = ExtResource("19_laser_glow")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=707760366]
+script = ExtResource("5_camz")
+
+[node name="EditMode" type="Node2D" parent="." unique_id=639805038]
+script = ExtResource("3_jr17i")
+
+[node name="LightMode" type="Node2D" parent="."]
+script = ExtResource("9_lmode")

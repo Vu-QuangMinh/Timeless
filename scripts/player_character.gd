@@ -6,6 +6,11 @@
 class_name PlayerCharacter
 extends Character
 
+const HACKER_FRAMES := preload("res://scenes/characters/hacker_frames.tres")
+const SPRITE_HEIGHT_PX := 179.2
+const SPAWN_BLINK_LOOPS := 10
+const SPAWN_BLINK_HALF_PERIOD := 0.08
+
 signal time_remaining_changed(seconds: float)
 signal time_bar_animate(to_seconds: float, over_real_seconds: float)
 signal selected_changed(is_selected: bool)
@@ -27,12 +32,16 @@ var _col_shape: CollisionShape2D
 var _action_objects: Array[ActionBase] = []
 var _move_tween: Tween = null
 var _turn_start_pos: Vector2
+var _anim_sprite: AnimatedSprite2D = null
+var _last_pos: Vector2 = Vector2.ZERO
+var _facing_right: bool = false
 
 func _ready() -> void:
 	super._ready()
 	ActionQueue.register_character(character_id)
 	_turn_start_pos = position
 	logical_pos     = position
+	_last_pos       = position
 
 	_col_shape = CollisionShape2D.new()
 	var circle := CircleShape2D.new()
@@ -40,7 +49,70 @@ func _ready() -> void:
 	_col_shape.shape = circle
 	add_child(_col_shape)
 
+	_setup_animated_sprite()
+	_play_spawn_blink()
+
+
+func _play_spawn_blink() -> void:
+	modulate.a = 1.0
+	var t := create_tween()
+	t.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+	t.set_loops(SPAWN_BLINK_LOOPS)
+	t.tween_property(self, "modulate:a", 0.2, SPAWN_BLINK_HALF_PERIOD)
+	t.tween_property(self, "modulate:a", 1.0, SPAWN_BLINK_HALF_PERIOD)
+	t.finished.connect(func(): modulate.a = 1.0)
+
+
+func _process(_delta: float) -> void:
+	if is_taken_down or _anim_sprite == null or not _anim_sprite.visible:
+		return
+	var v := position - _last_pos
+	_last_pos = position
+	if v.length() > 0.5:
+		if v.x > 0.1:
+			_facing_right = true
+		elif v.x < -0.1:
+			_facing_right = false
+		_set_anim("Walk_SE", not _facing_right)
+	else:
+		_set_anim("Idle_SW", _facing_right)
+
+
+func _set_anim(anim_name: String, flip: bool) -> void:
+	if _anim_sprite == null:
+		return
+	if _anim_sprite.animation == anim_name and _anim_sprite.flip_h == flip:
+		return
+	_anim_sprite.flip_h = flip
+	_anim_sprite.animation = anim_name
+	_anim_sprite.play()
+
+
+func _setup_animated_sprite() -> void:
+	_anim_sprite = get_node_or_null("AnimatedSprite2D") as AnimatedSprite2D
+	if _anim_sprite == null:
+		return
+	var frames: SpriteFrames = null
+	match character_class:
+		Character.CharacterClass.HACKER:
+			frames = HACKER_FRAMES
+	if frames == null:
+		_anim_sprite.visible = false
+		return
+	_anim_sprite.sprite_frames = frames
+	if frames.has_animation("Idle_SW"):
+		_anim_sprite.animation = "Idle_SW"
+		_anim_sprite.play()
+	var first_tex: Texture2D = frames.get_frame_texture(_anim_sprite.animation, 0)
+	if first_tex and first_tex.get_height() > 0:
+		var s: float = SPRITE_HEIGHT_PX / float(first_tex.get_height())
+		_anim_sprite.scale = Vector2(s, s)
+	_anim_sprite.visible = true
+	queue_redraw()
+
 func _draw() -> void:
+	if _anim_sprite and _anim_sprite.visible and not is_taken_down:
+		return
 	if is_taken_down:
 		_draw_fallen()
 		return
@@ -100,6 +172,9 @@ func take_down() -> void:
 		_move_tween = null
 	position = logical_pos
 	scale    = Vector2.ONE
+	if _anim_sprite:
+		_anim_sprite.visible = false
+		_anim_sprite.stop()
 	queue_redraw()
 
 ## Queue an action: register cost, update logical_pos for moves, then replay the full

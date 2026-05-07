@@ -1,0 +1,13 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3]
+
+[ext_resource type="Shader" path="res://scripts/laser_beam.gdshader" id="1_shader"]
+
+[resource]
+shader = ExtResource("1_shader")
+shader_parameter/intensity = 1.5
+shader_parameter/core_width = 0.2
+shader_parameter/glow_width = 0.7
+shader_parameter/glitch_amount = 0.15
+shader_parameter/glitch_rate = 12.0
+shader_parameter/flicker_amount = 0.3
+shader_parameter/length_fade = 0.04
