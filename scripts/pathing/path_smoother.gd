@@ -1,12 +1,12 @@
 ## PathSmoother
 ## Converts a raw waypoint list (from Pathfinder) into a MovePath with arc-and-line segments.
-## Arc radius at each bend is 0.5m = 8px, clamped so tangent length never exceeds half the
+## Arc radius at each bend is 0.5m = 16px, clamped so tangent length never exceeds half the
 ## shorter adjacent segment. Bends shorter than MIN_TURN_RAD radians are skipped (near-collinear).
 ## Does NOT compute raw paths — use Pathfinder. Does NOT reference game state.
 
 class_name PathSmoother
 
-const ARC_RADIUS   := 8.0   # pixels; 0.5m × 16px/m
+const ARC_RADIUS   := 16.0  # pixels; 0.5m × 32px/m
 const MIN_TURN_RAD := 0.01  # radians; skip arc below ~0.57°
 
 ## Typed container for one bend's pre-computed arc parameters.

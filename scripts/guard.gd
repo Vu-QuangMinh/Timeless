@@ -6,18 +6,20 @@
 class_name Guard
 extends CharacterBody2D
 
-const GUARD_RADIUS   := 8.0          # pixels; 0.5 m at 16 px/m — same footprint as player
+const GUARD_RADIUS   := 16.0         # pixels; 0.5 m at 32 px/m — same footprint as player
 const FOV_HALF_RAD   := PI / 3.0     # 60° half-angle → 120° total FoV
-const FOV_VISUAL_PX  := 48.0         # visual wedge length (3 m); game range is 20 m
+const FOV_VISUAL_PX  := 96.0         # visual wedge length (3 m); game range is 20 m
 
 const C_ACTIVE   := Color(1.0, 0.55, 0.10, 1.0)   # amber
 const C_NEUTRAL  := Color(0.40, 0.40, 0.40, 1.0)  # grey when neutralised
 const C_FOV_FILL := Color(1.0, 0.85, 0.20, 0.10)
 const C_FOV_EDGE := Color(1.0, 0.85, 0.20, 0.28)
 
-var guard_id: int        = 0
-var facing_angle: float  = 0.0    # radians; Godot screen-space (0 = right, π/2 = down)
-var is_neutralized: bool = false
+var guard_id: int            = 0
+var facing_angle: float      = 0.0    # radians; Godot screen-space (0 = right, π/2 = down)
+var is_neutralized: bool     = false
+## PI/2 = turn clockwise (right), -PI/2 = turn counterclockwise (left). Set once at spawn.
+var patrol_turn_angle: float = 0.0
 
 # Predict-phase state — saved on enter, restored on Back to Planning.
 var _predict_start_pos: Vector2
@@ -44,7 +46,7 @@ func _draw() -> void:
 
 	# Facing direction line
 	var dir := Vector2(cos(facing_angle), sin(facing_angle))
-	draw_line(Vector2.ZERO, dir * (GUARD_RADIUS + 5.0), Color.WHITE, 1.5)
+	draw_line(Vector2.ZERO, dir * (GUARD_RADIUS + 10.0), Color.WHITE, 1.5)
 
 func _draw_fov() -> void:
 	const STEPS := 12

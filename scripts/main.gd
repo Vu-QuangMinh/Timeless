@@ -13,9 +13,9 @@ const ContextMenuScene := preload("res://scenes/ui/context_menu.tscn")
 const PathPreviewScene := preload("res://scenes/ui/path_preview.tscn")
 
 const SPAWN_POSITIONS := [
-	Vector2(-28.0, 136.0),
-	Vector2(  0.0, 136.0),
-	Vector2( 28.0, 136.0),
+	Vector2(-56.0, 272.0),
+	Vector2(  0.0, 272.0),
+	Vector2( 56.0, 272.0),
 ]
 const SPAWN_CLASSES := [
 	Character.CharacterClass.BRAWLER,
@@ -25,24 +25,24 @@ const SPAWN_CLASSES := [
 
 # Chest geometry (matches TestMap)
 const CHEST_CENTER  := Vector2.ZERO
-const CHEST_OBS_R   := 12.0
-const CHEST_CLICK_R := 24.0
+const CHEST_OBS_R   := 24.0
+const CHEST_CLICK_R := 48.0
 
-# Door centres — walls at ±160 px (TestMap.HALF, 10m)
+# Door centres — walls at ±320 px (TestMap.HALF, 10m at 32px/m)
 const DOOR_CENTERS: Array = [
-	Vector2(  0.0,  160.0),
-	Vector2(  0.0, -160.0),
-	Vector2(-160.0,   0.0),
-	Vector2( 160.0,   0.0),
+	Vector2(  0.0,  320.0),
+	Vector2(  0.0, -320.0),
+	Vector2(-320.0,   0.0),
+	Vector2( 320.0,   0.0),
 ]
-const DOOR_CLICK_R    := 24.0
-const ACTION_REACH_PX := 8.0    # 0.5 m × 16 px/m
-const GUARD_CLICK_R   := 16.0
+const DOOR_CLICK_R    := 48.0
+const ACTION_REACH_PX := 16.0   # 0.5 m × 32 px/m
+const GUARD_CLICK_R   := 32.0
 
 # Guard Predict constants
-const GUARD_SPEED_PX  := 80.0   # 5 m/s × 16 px/m
-const GUN_RANGE_PX    := 320.0  # 20 m
-const TASER_RANGE_PX  := 8.0    # 0.5 m
+const GUARD_SPEED_PX  := 40.0   # 1.25 m/s × 32 px/m
+const GUN_RANGE_PX    := 640.0  # 20 m × 32 px/m
+const TASER_RANGE_PX  := 16.0   # 0.5 m × 32 px/m
 const GUN_FIRE_S      := 3.0    # seconds to fire
 const TASER_S         := 2.0    # seconds to tase
 
@@ -107,11 +107,12 @@ func _spawn_guards() -> void:
 	for i in 3:
 		var jitter := (randf() - 0.5) * deg_to_rad(50.0)
 		var angle  := base_angle + i * (TAU / 3.0) + jitter
-		var pos    := Vector2(cos(angle), sin(angle)) * 80.0    # 5 m × 16 px/m
-		var g          := Guard.new()
-		g.guard_id      = i
-		g.position      = pos
-		g.facing_angle  = _angle_to_nearest_door(pos)
+		var pos    := Vector2(cos(angle), sin(angle)) * 160.0   # 5 m × 32 px/m
+		var g              := Guard.new()
+		g.guard_id          = i
+		g.position          = pos
+		g.facing_angle      = _angle_to_nearest_door(pos)
+		g.patrol_turn_angle = PI / 2.0 if randf() < 0.5 else -PI / 2.0
 		guards_node.add_child(g)
 		_guards.append(g)
 
@@ -212,29 +213,129 @@ func _run_predict() -> void:
 		g._predict_start_pos    = g.global_position
 		g._predict_start_facing = g.facing_angle
 
-		var target := _guard_nearest_target(g)
+		var target := _guard_fov_target(g)
 		if target == null:
+			_animate_guard_patrol(g)
 			continue
 
 		var dist := g.global_position.distance_to(target.logical_pos)
-		# Design: shoot if clear LoS, within 20 m, > 0.5 m, no hostage held.
-		# LoS ray-casting is out of scope for this build — distance-only check.
 		if not hostage_held and dist <= GUN_RANGE_PX and dist > TASER_RANGE_PX:
 			_animate_guard_shoot(g, target)
 		else:
 			_animate_guard_move(g, target)
 
-func _guard_nearest_target(guard: Guard) -> PlayerCharacter:
+## Nearest non-downed player inside the guard's FOV cone, or null if none visible.
+func _guard_fov_target(guard: Guard) -> PlayerCharacter:
 	var nearest: PlayerCharacter = null
 	var best_dist := INF
 	for ch in _characters:
 		if ch.is_taken_down:
+			continue
+		if not _is_in_guard_fov(guard, ch.logical_pos):
 			continue
 		var d := guard.global_position.distance_to(ch.logical_pos)
 		if d < best_dist:
 			best_dist = d
 			nearest   = ch
 	return nearest
+
+func _is_in_guard_fov(guard: Guard, target_pos: Vector2) -> bool:
+	var to_target := target_pos - guard.global_position
+	var dist      := to_target.length()
+	if dist > GUN_RANGE_PX:
+		return false
+	if dist < 0.5:
+		return true
+	var facing_dir := Vector2(cos(guard.facing_angle), sin(guard.facing_angle))
+	return absf(facing_dir.angle_to(to_target.normalized())) <= Guard.FOV_HALF_RAD
+
+## How far the guard can move in dir before the FOV front point (pos + dir*(d + FOV_VIS)) hits a wall.
+func _fov_wall_dist(pos: Vector2, dir: Vector2) -> float:
+	const ROOM_HALF := 320.0  # TestMap.HALF — 10m × 32px/m
+	var fov_vis := Guard.FOV_VISUAL_PX
+	var best    := INF
+	if dir.x > 0.001:
+		var d := (ROOM_HALF  - pos.x) / dir.x - fov_vis
+		if d >= 0.0: best = minf(best, d)
+	elif dir.x < -0.001:
+		var d := (-ROOM_HALF - pos.x) / dir.x - fov_vis
+		if d >= 0.0: best = minf(best, d)
+	if dir.y > 0.001:
+		var d := (ROOM_HALF  - pos.y) / dir.y - fov_vis
+		if d >= 0.0: best = minf(best, d)
+	elif dir.y < -0.001:
+		var d := (-ROOM_HALF - pos.y) / dir.y - fov_vis
+		if d >= 0.0: best = minf(best, d)
+	return 0.0 if is_inf(best) else best
+
+## Cardinal angle pointing directly toward the nearest wall from pos.
+func _facing_toward_nearest_wall(pos: Vector2) -> float:
+	const ROOM_HALF := 320.0
+	var d_north := pos.y - (-ROOM_HALF)
+	var d_south := ROOM_HALF - pos.y
+	var d_west  := pos.x - (-ROOM_HALF)
+	var d_east  := ROOM_HALF - pos.x
+	var min_d   := minf(minf(d_north, d_south), minf(d_west, d_east))
+	if   min_d == d_north: return -PI / 2.0   # face north (up)
+	elif min_d == d_south: return  PI / 2.0   # face south (down)
+	elif min_d == d_west:  return  PI         # face west  (left)
+	else:                  return  0.0        # face east  (right)
+
+## Patrol: face the nearest wall perpendicularly, move until FOV front hits it, then turn by
+## patrol_turn_angle (set at spawn). Repeats for the full turn budget.
+func _animate_guard_patrol(guard: Guard) -> void:
+	guard._predict_tween = create_tween()
+	var pos     := guard.global_position
+	# Always start by facing directly toward the nearest wall, regardless of current heading.
+	var facing  := _facing_toward_nearest_wall(pos)
+	var cf0     := facing
+	guard._predict_tween.tween_callback(func():
+		guard.facing_angle = cf0
+		guard.queue_redraw()
+	)
+	var elapsed := 0.0
+	var budget  := GameManager.TURN_DURATION
+	var safety  := 0
+
+	while elapsed < budget - 0.001 and safety < 50:
+		safety += 1
+		var dir  := Vector2(cos(facing), sin(facing))
+		var dist := _fov_wall_dist(pos, dir)
+
+		if dist <= 0.5:
+			# Already at wall stop — turn in place without moving.
+			facing = wrapf(facing + guard.patrol_turn_angle, -PI, PI)
+			var cf := facing
+			guard._predict_tween.tween_callback(func():
+				guard.facing_angle = cf
+				guard.queue_redraw()
+			)
+			continue
+
+		var secs_to_wall := dist / GUARD_SPEED_PX
+
+		if elapsed + secs_to_wall >= budget:
+			# Partial move fills the remaining budget.
+			var remaining := budget - elapsed
+			var end_pos   := pos + dir * (GUARD_SPEED_PX * remaining)
+			guard._predict_tween.tween_property(
+				guard, "position", end_pos,
+				remaining / GameManager.ANIMATION_SPEED_MULTIPLIER)
+			break
+
+		# Full move to the wall stop, then turn.
+		var stop_pos := pos + dir * dist
+		guard._predict_tween.tween_property(
+			guard, "position", stop_pos,
+			secs_to_wall / GameManager.ANIMATION_SPEED_MULTIPLIER)
+		elapsed += secs_to_wall
+		pos      = stop_pos
+		facing   = wrapf(facing + guard.patrol_turn_angle, -PI, PI)
+		var cf   := facing
+		guard._predict_tween.tween_callback(func():
+			guard.facing_angle = cf
+			guard.queue_redraw()
+		)
 
 ## Recompute every guard's is_neutralized from scratch:
 ## start from the committed baseline, then re-apply any takedowns in the current planning queues.
@@ -470,7 +571,7 @@ func _build_guard_items(guard: Guard, sel: PlayerCharacter) -> Array:
 	return items
 
 func _build_hack_items(target_type: String, target_center: Vector2, sel: PlayerCharacter) -> Array:
-	var hack_px   := TimeCalculator.hack_range(sel.stat_int) * 16.0
+	var hack_px   := TimeCalculator.hack_range(sel.stat_int) * 32.0
 	var cost      := TimeCalculator.hack_time(target_type, sel.stat_int)
 	var remaining := sel.get_turn_time_remaining()
 
