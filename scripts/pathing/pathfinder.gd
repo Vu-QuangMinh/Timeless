@@ -7,8 +7,8 @@
 
 class_name Pathfinder
 
-const CHAR_RADIUS := 8.0   # pixels; 0.5m × 16px/m — inflated onto all obstacle radii
-const EPSILON     := 0.5   # px; tolerance for duplicate nodes and edge clearance
+const CHAR_RADIUS := 16.0  # pixels; 0.5m × 32px/m — inflated onto all obstacle radii
+const EPSILON     := 1.0   # px; tolerance for duplicate nodes and edge clearance
 
 ## circles: Array of {center: Vector2, radius: float}
 ## wall_segs: Array of PackedVector2Array, each with exactly 2 points [p1, p2]

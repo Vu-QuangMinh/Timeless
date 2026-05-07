@@ -2,20 +2,20 @@
 ## Draws the 20m×20m test room (walls, doors, windows, chest) using _draw().
 ## All geometry is visual only in this build — collision walls come in a later phase.
 ## Does NOT spawn characters, manage guards, or handle game logic.
-## Coordinate system: 1 world unit = 1 pixel, 16px = 1 meter. Origin at room center.
+## Coordinate system: 1 world unit = 1 pixel, 32px = 1 meter. Origin at room center.
 
 class_name TestMap
 extends Node2D
 
 # --- Scale constants (pixels) ---
-const PPM    := 16.0   # pixels per meter
-const HALF   := 160.0  # 10m half-extent of room interior (20m×20m room)
-const WALL_T := 16.0   # 1m wall thickness
-const DOOR_H := 24.0   # half of 3m door opening
-const WIN_W  := 16.0   # 1m window width (half = 8px)
+const PPM    := 32.0   # pixels per meter
+const HALF   := 320.0  # 10m half-extent of room interior (20m×20m room)
+const WALL_T := 32.0   # 1m wall thickness
+const DOOR_H := 48.0   # half of 3m door opening
+const WIN_W  := 32.0   # 1m window width (half = 16px)
 
 # Derived: length from wall edge to door gap on one side
-const _HALF_WALL := HALF - DOOR_H  # 136px
+const _HALF_WALL := HALF - DOOR_H  # 272px
 
 ## World-space position of each door center (used by main.gd for spawn).
 const DOOR_SOUTH := Vector2(0.0,   HALF)
@@ -120,8 +120,8 @@ func _draw_v_windows(wall_x: float, _side: float, ww: float, wh: float, seg: flo
 	draw_rect(Rect2(wall_x, by + seg,  ww, wh), C_WINDOW)
 
 func _draw_chest() -> void:
-	# Chest at center: 24×24px box, gold. Red lock indicator on top.
-	var size := Vector2(24.0, 24.0)
+	# Chest at center: 48×48px box (3m×3m), gold. Red lock indicator on top.
+	var size := Vector2(48.0, 48.0)
 	var origin := -size * 0.5
 	draw_rect(Rect2(origin, size), C_CHEST)
 	# Lock indicator: small red square upper half
@@ -155,4 +155,4 @@ func get_wall_segments() -> Array[PackedVector2Array]:
 ## Returns the chest as a circular obstacle for the pathfinder.
 ## Radius = half the chest's visual width (12px). Pathfinder inflates by CHAR_RADIUS itself.
 func get_chest_obstacle() -> Dictionary:
-	return {center = Vector2.ZERO, radius = 12.0}
+	return {center = Vector2.ZERO, radius = 24.0}

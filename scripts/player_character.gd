@@ -16,10 +16,10 @@ signal time_bar_animate(to_seconds: float, over_real_seconds: float)
 signal selected_changed(is_selected: bool)
 
 const TURN_BUDGET   := 10.0
-const CHAR_RADIUS   := 8.0   # pixels; 0.5m at 16px/m
-# Fallen ellipse dimensions (2m × 0.7m at 16px/m)
-const FALLEN_A      := 16.0  # semi-major axis (1m)
-const FALLEN_B      := 5.6   # semi-minor axis (0.35m)
+const CHAR_RADIUS   := 16.0  # pixels; 0.5m at 32px/m
+# Fallen ellipse dimensions (2m × 0.7m at 32px/m)
+const FALLEN_A      := 32.0  # semi-major axis (1m)
+const FALLEN_B      := 11.2  # semi-minor axis (0.35m)
 
 var is_selected:   bool = false
 var is_taken_down: bool = false
@@ -120,7 +120,7 @@ func _draw() -> void:
 	var fill := Color.CYAN if is_selected else _class_color()
 	draw_circle(Vector2.ZERO, CHAR_RADIUS, fill)
 	if is_selected:
-		draw_arc(Vector2.ZERO, CHAR_RADIUS + 2.0, 0.0, TAU, 24, Color.WHITE, 1.5)
+		draw_arc(Vector2.ZERO, CHAR_RADIUS + 4.0, 0.0, TAU, 24, Color.WHITE, 1.5)
 	var font   := ThemeDB.fallback_font
 	var fs     := 9
 	var text   := display_name()

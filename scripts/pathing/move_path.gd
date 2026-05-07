@@ -6,7 +6,7 @@
 
 class_name MovePath
 
-const PPM := 16.0  # pixels per meter — must match TestMap
+const PPM := 32.0  # pixels per meter — must match TestMap
 
 ## A single segment: either a straight line or a circular arc.
 class Segment:
