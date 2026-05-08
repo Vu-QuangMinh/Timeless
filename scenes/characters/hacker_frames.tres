@@ -1,17 +1,17 @@
-[gd_resource type="SpriteFrames" load_steps=13 format=3]
+[gd_resource type="SpriteFrames" format=3 uid="uid://dqb835gtq5gy7"]
 
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Idle_SW/0.tres" id="1_isw0"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Idle_SW/1.tres" id="1_isw1"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Idle_SW/2.tres" id="1_isw2"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Idle_SW/3.tres" id="1_isw3"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/0.tres" id="2_wse0"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/1.tres" id="2_wse1"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/2.tres" id="2_wse2"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/3.tres" id="2_wse3"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/4.tres" id="2_wse4"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/5.tres" id="2_wse5"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/6.tres" id="2_wse6"]
-[ext_resource type="CanvasTexture" path="res://assets/characters/hacker/Walk_SE/7.tres" id="2_wse7"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Idle_SW/0.tres" id="1_isw0"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Idle_SW/1.tres" id="1_isw1"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Idle_SW/2.tres" id="1_isw2"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Idle_SW/3.tres" id="1_isw3"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/0.tres" id="2_wse0"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/1.tres" id="2_wse1"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/2.tres" id="2_wse2"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/3.tres" id="2_wse3"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/4.tres" id="2_wse4"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/5.tres" id="2_wse5"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/6.tres" id="2_wse6"]
+[ext_resource type="Texture2D" path="res://assets/characters/hacker/Walk_SE/7.tres" id="2_wse7"]
 
 [resource]
 animations = [{
@@ -40,9 +40,6 @@ animations = [{
 "texture": ExtResource("2_wse1")
 }, {
 "duration": 1.0,
-"texture": ExtResource("2_wse2")
-}, {
-"duration": 1.0,
 "texture": ExtResource("2_wse3")
 }, {
 "duration": 1.0,
@@ -56,6 +53,9 @@ animations = [{
 }, {
 "duration": 1.0,
 "texture": ExtResource("2_wse7")
+}, {
+"duration": 1.0,
+"texture": ExtResource("2_wse2")
 }],
 "loop": true,
 "name": &"Walk_SE",

@@ -378,3 +378,17 @@ func get_wall_segments() -> Array:
 
 func get_chest_obstacle() -> Dictionary:
 	return {"center": Vector2.ZERO, "radius": 0.0}
+
+
+func get_cctvs() -> Array:
+	var result: Array = []
+	var lighting := get_node_or_null("Lighting")
+	if lighting == null:
+		return result
+	var id := 0
+	for node in lighting.get_children():
+		if node is CCTV:
+			node.cctv_id = id
+			id += 1
+			result.append(node)
+	return result

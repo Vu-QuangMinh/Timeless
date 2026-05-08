@@ -38,6 +38,7 @@ const DOOR_CENTERS: Array = [
 const DOOR_CLICK_R    := 48.0
 const ACTION_REACH_PX := 16.0   # 0.5 m × 32 px/m
 const GUARD_CLICK_R   := 32.0
+const CCTV_CLICK_R    := 40.0
 
 # Guard Predict constants
 const GUARD_SPEED_PX  := 40.0   # 1.25 m/s × 32 px/m
@@ -45,6 +46,9 @@ const GUN_RANGE_PX    := 640.0  # 20 m × 32 px/m
 const TASER_RANGE_PX  := 16.0   # 0.5 m × 32 px/m
 const GUN_FIRE_S      := 3.0    # seconds to fire
 const TASER_S         := 2.0    # seconds to tase
+
+# CCTV Predict constants
+const CCTV_DETECT_STEP_S := 0.1  # game-seconds per detection sample (100 steps / turn)
 
 var _characters: Array[PlayerCharacter] = []
 var _guards: Array[Guard] = []
@@ -54,6 +58,9 @@ var _map: Node2D
 var _context_menu: ContextMenu
 var _path_preview: PathPreview
 var _menu_layer: CanvasLayer
+
+var _cctvs: Array = []
+var _cctvs_hacked_baseline: Dictionary = {}
 
 var _chest_locked: bool    = true
 var _chest_picked_up: bool = false
@@ -66,6 +73,7 @@ func _ready() -> void:
 	_setup_map()
 	_spawn_characters()
 	_spawn_guards()
+	_load_cctvs()
 	_setup_hud()
 	_setup_overlays()
 	TurnManager.phase_changed.connect(_on_phase_changed_main)
@@ -126,6 +134,9 @@ func _spawn_guards() -> void:
 		guards_node.add_child(g)
 		_guards.append(g)
 
+func _load_cctvs() -> void:
+	_cctvs = _map.get_cctvs()
+
 func _setup_hud() -> void:
 	_hud = HUDScene.instantiate()
 	add_child(_hud)
@@ -166,9 +177,11 @@ func _on_phase_changed_main(phase: GameManager.Phase) -> void:
 		_run_predict()
 
 func _on_turn_started(_turn_number: int) -> void:
-	# Snapshot guard neutralization state so undo/reset can restore to this baseline.
+	# Snapshot guard/CCTV state so undo/reset can restore to this baseline.
 	for g in _guards:
 		_guards_neutralized_baseline[g.guard_id] = g.is_neutralized
+	for cctv in _cctvs:
+		_cctvs_hacked_baseline[cctv.cctv_id] = cctv.is_hacked
 	for ch in _characters:
 		ch.on_new_turn()
 	_hud.update_selected_character(_selected_char())
@@ -195,6 +208,11 @@ func _on_back_pressed() -> void:
 		g.facing_angle = g._predict_start_facing
 		g.modulate     = Color.WHITE
 		g.queue_redraw()
+	# Restore CCTV pan phase to pre-predict snapshot.
+	for cctv in _cctvs:
+		cctv._time = cctv._predict_start_time
+		cctv.rotation = cctv._base_rotation + deg_to_rad(cctv.pan_amplitude_deg) * \
+			sin(cctv._predict_start_time * TAU / max(cctv.pan_period_sec, 0.01))
 	# Restore any characters taken down during this preview.
 	for ch in _predict_downed:
 		ch.is_taken_down = false
@@ -233,6 +251,8 @@ func _run_predict() -> void:
 			_animate_guard_shoot(g, target)
 		else:
 			_animate_guard_move(g, target)
+
+	_predict_cctv_detections()
 
 ## Nearest non-downed player inside the guard's FOV cone, or null if none visible.
 func _guard_fov_target(guard: Guard) -> PlayerCharacter:
@@ -367,6 +387,64 @@ func _recompute_guard_neutralizations() -> void:
 	for g in _guards:
 		g.queue_redraw()
 
+## Recompute every CCTV's is_hacked from the committed baseline, then re-apply
+## any camera hack actions in the current planning queues.
+func _recompute_cctv_hacks() -> void:
+	for cctv in _cctvs:
+		if _cctvs_hacked_baseline.get(cctv.cctv_id, false):
+			cctv.hack()
+		else:
+			cctv.restore()
+	for ch in _characters:
+		if ch.is_taken_down:
+			continue
+		for action in ch.get_queued_actions():
+			var ha := action as ActionHack
+			if ha == null or ha.target_type != "cctv":
+				continue
+			for cctv in _cctvs:
+				if cctv.global_position.distance_to(ha.target_pos) < 2.0:
+					cctv.hack()
+					break
+
+## For each non-hacked CCTV, step through the 10 s turn budget in CCTV_DETECT_STEP_S increments
+## and take down any player whose logical position falls inside the cone at any sample point.
+## Uses the same _predict_downed list as guard-shoot so Back-to-Planning restores them.
+func _predict_cctv_detections() -> void:
+	var wall_segs: Array = _map.get_wall_segments()
+	var step_count := int(GameManager.TURN_DURATION / CCTV_DETECT_STEP_S)
+	for cctv in _cctvs:
+		if cctv.is_hacked:
+			continue
+		cctv._predict_start_time = cctv._time
+		for i in range(step_count + 1):
+			var t := i * CCTV_DETECT_STEP_S
+			var rot: float = cctv._base_rotation + deg_to_rad(cctv.pan_amplitude_deg) * \
+				sin((cctv._predict_start_time + t) * TAU / max(cctv.pan_period_sec, 0.01))
+			var facing := Vector2(-sin(rot), cos(rot))
+			for ch in _characters:
+				if ch.is_taken_down:
+					continue
+				if _cctv_sees(cctv, facing, ch.logical_pos, wall_segs):
+					ch.take_down()
+					_predict_downed.append(ch)
+
+## Returns true if the CCTV's cone at the given facing direction covers target_pos with clear LOS.
+## Facing direction is the world-space local +Y of the CCTV node: Vector2(-sin(rot), cos(rot)).
+func _cctv_sees(cctv: CCTV, facing: Vector2, target_pos: Vector2, wall_segs: Array) -> bool:
+	var to_target := target_pos - cctv.global_position
+	var dist := to_target.length()
+	if dist > cctv.view_distance_px:
+		return false
+	if dist < 0.5:
+		return true
+	if absf(facing.angle_to(to_target.normalized())) > deg_to_rad(cctv.fov_half_angle_deg):
+		return false
+	for ws in wall_segs:
+		if Pathfinder._segs_intersect(cctv.global_position, target_pos, ws[0], ws[1]):
+			return false
+	return true
+
 func _anyone_holding_hostage() -> bool:
 	for ch in _characters:
 		for entry in ActionQueue.get_queue(ch.character_id):
@@ -428,10 +506,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_QUOTELEFT:
 				_selected_char().undo_last_action()
 				_recompute_guard_neutralizations()
+				_recompute_cctv_hacks()
 			KEY_R:
 				for ch in _characters:
 					ch.reset_turn_actions()
 				_recompute_guard_neutralizations()
+				_recompute_cctv_hacks()
 				_hud.update_selected_character(_selected_char())
 
 	elif event is InputEventMouseButton and event.pressed:
@@ -477,9 +557,15 @@ func _open_context_menu_at(world_pos: Vector2, screen_pos: Vector2) -> void:
 				break
 
 	if items.is_empty():
+		for cctv in _cctvs:
+			if not cctv.is_hacked and world_pos.distance_to(cctv.global_position) < CCTV_CLICK_R:
+				items = _build_hack_items("cctv", cctv.global_position, sel, "Hack Camera")
+				break
+
+	if items.is_empty():
 		for dc: Vector2 in DOOR_CENTERS:
 			if world_pos.distance_to(dc) < DOOR_CLICK_R:
-				items = _build_hack_items("door", dc, sel)
+				items = _build_hack_items("door", dc, sel, "Hack Door")
 				break
 
 	if items.is_empty():
@@ -580,17 +666,17 @@ func _build_guard_items(guard: Guard, sel: PlayerCharacter) -> Array:
 
 	return items
 
-func _build_hack_items(target_type: String, target_center: Vector2, sel: PlayerCharacter) -> Array:
+func _build_hack_items(target_type: String, target_center: Vector2, sel: PlayerCharacter, base_label: String = "Hack") -> Array:
 	var hack_px   := TimeCalculator.hack_range(sel.stat_int) * 32.0
 	var cost      := TimeCalculator.hack_time(target_type, sel.stat_int)
 	var remaining := sel.get_turn_time_remaining()
 
 	if sel.logical_pos.distance_to(target_center) <= hack_px:
-		return [_action_item("Hack Door", cost, "hack",
+		return [_action_item(base_label, cost, "hack",
 			{cost = cost, target_type = target_type, target_pos = target_center}, remaining)]
 
 	return [{
-		label = "Hack Door (out of range)", cost_str = "%.1f s" % cost,
+		label = base_label + " (out of range)", cost_str = "%.1f s" % cost,
 		enabled = false, action_type = "hack", data = {},
 	}]
 
@@ -705,6 +791,8 @@ func _on_action_selected(action_type: String, data: Dictionary) -> void:
 			action.target_type      = data.get("target_type", "door")
 			action.target_pos       = data.get("target_pos", Vector2.ZERO)
 			sel.queue_action(action)
+			if action.target_type == "cctv":
+				_recompute_cctv_hacks()
 
 		"takedown":
 			var action           := ActionTakedown.new()

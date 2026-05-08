@@ -112,10 +112,10 @@ func _test_takedown_time() -> void:
 
 func _test_hack_time() -> void:
 	print("hack_time")
-	# Camera, int=0 → 4/1.0 = 4.0
-	_assert_near("camera int=0",  TC.hack_time("camera", 0),  4.0)
-	# Camera, int=10 → 4/2.0 = 2.0
-	_assert_near("camera int=10", TC.hack_time("camera", 10), 2.0)
+	# CCTV, int=0 → 4/1.0 = 4.0
+	_assert_near("cctv int=0",  TC.hack_time("cctv", 0),  4.0)
+	# CCTV, int=10 → 4/2.0 = 2.0
+	_assert_near("cctv int=10", TC.hack_time("cctv", 10), 2.0)
 	# Door, int=0 → 6.0
 	_assert_near("door int=0",    TC.hack_time("door", 0),    6.0)
 	# Door, int=3 → 6/1.3 ≈ 4.615

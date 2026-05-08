@@ -1,6 +1,6 @@
 ## ActionHack
 ## Hacks a target at range hack_range(INT) meters. Cost: hack_time(target_type, INT).
-## target_type: "camera" | "tripwire" | "red_button" | "window" | "door"
+## target_type: "cctv" | "tripwire" | "red_button" | "window" | "door"
 
 class_name ActionHack
 extends ActionBase

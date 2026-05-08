@@ -66,7 +66,7 @@ static func takedown_time(enemy_type: String, str: int) -> float:
 
 ## Base times by target type (seconds).
 const HACK_BASE := {
-	"camera":      4.0,
+	"cctv":        4.0,
 	"tripwire":    4.0,
 	"red_button":  6.0,
 	"window":      5.0,

@@ -13,7 +13,7 @@
 [ext_resource type="Texture2D" path="res://assets/security/Laser_sensor.png" id="15_laser"]
 [ext_resource type="Texture2D" path="res://assets/level1/cctv_cone_light.png" id="13_cone_tex"]
 [ext_resource type="ShaderMaterial" path="res://assets/level1/cctv_cone_mat.tres" id="11_cone_mat"]
-[ext_resource type="Script" path="res://scripts/cctv_pan.gd" id="12_pan"]
+[ext_resource type="Script" uid="uid://cpaiihguv0ois" path="res://scripts/cctv.gd" id="12_pan"]
 [ext_resource type="ShaderMaterial" path="res://assets/level1/cctv_cone_mat.tres" id="16_unused_laser"]
 [ext_resource type="Texture2D" path="res://assets/level1/point_light_radial.tres" id="17_rad"]
 [ext_resource type="Script" path="res://scripts/laser_glow.gd" id="19_laser_glow"]
