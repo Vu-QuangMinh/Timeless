@@ -1,6 +1,8 @@
 class_name HUD
 extends CanvasLayer
 
+signal commit_pressed()
+
 const CHAR_COLORS: Array = [
 	Color("#dc4444"),
 	Color("#6688cc"),
@@ -120,12 +122,15 @@ func _build_phase_buttons() -> void:
 	_commit_btn.position = Vector2(vp_size.x - 120.0, btn_y)
 	_commit_btn.size = Vector2(90.0, 30.0)
 	_commit_btn.disabled = true
+	_commit_btn.pressed.connect(func(): commit_pressed.emit())
 	add_child(_commit_btn)
 
 
 func refresh(characters: Array, selected_idx: int) -> void:
 	_timer_label.text = "%.1fs" % GameManager.global_time_remaining
-	_phase_label.text = _phase_name(GameManager.phase)
+	if GameManager.phase != GameManager.Phase.COMMIT:
+		_phase_label.text = _phase_name(GameManager.phase)
+	var any_queued := false
 	for i in minf(characters.size(), _char_containers.size()):
 		var pc: PlayerCharacter = characters[i]
 		var c: Dictionary = _char_containers[i]
@@ -135,6 +140,18 @@ func refresh(characters: Array, selected_idx: int) -> void:
 		var remaining := pc.get_turn_time_remaining()
 		c["time_lbl"].text = "%.1fs remaining" % maxf(remaining, 0.0)
 		c["bar"].value = used
+		if used > 0.001:
+			any_queued = true
+	if GameManager.mission_active and GameManager.phase == GameManager.Phase.PLANNING:
+		_commit_btn.disabled = not any_queued
+	else:
+		_commit_btn.disabled = true
+
+
+func set_phase(p: String) -> void:
+	_phase_label.text = p
+	if p != "PLANNING":
+		_commit_btn.disabled = true
 
 
 func _phase_name(p: int) -> String:

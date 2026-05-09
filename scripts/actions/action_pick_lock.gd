@@ -15,6 +15,20 @@ func _init(pc, level: int, ltype: String, tpos: Vector2) -> void:
 	cost = TimeCalculator.pick_lock_time(level, int_stat)
 
 
+func execute_visual(_char, _tween: Tween) -> void:
+	var dur := get_animation_duration()
+	_tween.tween_callback(func(): _char.scale = Vector2.ONE)
+	_tween.tween_property(_char, "scale", Vector2(1.06, 1.06), dur * 0.2)
+	_tween.tween_property(_char, "scale", Vector2(0.97, 0.97), dur * 0.2)
+	_tween.tween_property(_char, "scale", Vector2(1.06, 1.06), dur * 0.2)
+	_tween.tween_property(_char, "scale", Vector2(0.97, 0.97), dur * 0.2)
+	_tween.tween_property(_char, "scale", Vector2.ONE,         dur * 0.2)
+	_tween.tween_callback(func():
+		if on_complete.is_valid():
+			on_complete.call()
+	)
+
+
 func to_dict() -> Dictionary:
 	var d := super.to_dict()
 	d["lock_level"] = lock_level

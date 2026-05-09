@@ -452,3 +452,175 @@ A few notes on what to expect:
 The reference files on main have a lot of code, especially main.gd (800 lines) and hud.gd (240 lines). Claude Code will probably want to copy chunks rather than write fresh — that's fine for HUD and context menu, less fine for main.gd because the new one needs iso-coord adaptations throughout. Watch for that in the plan.
 The action queue logic on main was tightly coupled to the old screen-space pathfinder. The hardest part of M2 is making sure the cost calculations all flow through world-meter distances cleanly. If Claude Code's plan has any * 32 or / 32 floating around, push back.
 The plan should include "implement test_actions.gd" as one of the bullets. If it doesn't, push back.
+
+Milestone 3a Prompt for Claude Code
+
+Milestone 3a — Commit phase: characters execute queued actions
+M2 is done: planning loop works, three characters can queue moves, pick lock, pick up actions; HUD shows costs; undo / reset work; chained actions plan from _get_planned_end_pos. The Commit and Predict buttons exist but do nothing.
+M3a wires up the Commit button so queued actions actually execute. Press Commit → all three characters animate through their queues in parallel over the 10-second turn budget → mission timer advances by 10 seconds → next planning turn begins.
+Out of scope for M3a: Predict phase, guards, CCTVs, win/lose detection, partial actions at turn boundary.
+Reference: the old code on main branch
+Read these for behavioral spec — the patterns are correct, the coordinate space and constants are wrong:
+
+git show main:scripts/actions/action_move.gd — execute_visual(character) tweens character along path
+git show main:scripts/actions/action_pick_lock.gd — squash-stretch tween animation while lockpicking
+git show main:scripts/actions/action_pickup.gd — squash-stretch + carries weight
+git show main:scripts/player_character.gd — commit_actions(), finalize_for_predict(), _run_action_visuals()
+git show main:scripts/main.gd — _on_commit_pressed, _on_turn_started baseline snapshots
+git show main:autoloads/turn_manager.gd — phase transitions
+
+Locked design decisions
+
+Commit phase advances the mission timer by TURN_DURATION (10s) regardless of whether characters used the full budget. A character with only 4s of queued actions still consumes 10s of mission time — the unused 4s is wasted. This matches the design doc.
+Animations run at ANIMATION_SPEED_MULTIPLIER (currently 5×) of real-time. A 10-second turn animates over 2 real seconds. This is so players don't sit through 10s of waiting per turn.
+All three characters' queues animate in parallel. They start at t=0 and animate forward; each character's actions chain back-to-back along their personal timeline. If Brawler has [Move 3s, Pick Lock 6s] and Hacker has [Move 5s], at animation t=4s, Brawler is mid-pick-lock and Hacker is done with his move standing still.
+Action timing within a character's queue is sequential. Each action's start_time is the cumulative sum of previous action costs. The action executes from t=start_time to t=start_time + cost.
+Commit is irreversible. Once the animation completes, queues are cleared, character logical positions are updated to their final positions, chest state changes (locked → unlocked, picked up flag) persist into the next turn. Backtick / R do not work during commit.
+A new turn starts after commit completes. TurnManager transitions PLANNING → COMMIT → PLANNING. Characters get a fresh 10s budget. The mission timer continues counting down (now 50s left if we started at 60s).
+Mission ends when timer hits 0. No win/lose logic in M3a — when the timer reaches 0, freeze the game state, show "TIME UP" or similar in the HUD, disable the Commit button. Win/lose is M4.
+Inputs locked during Commit. Right-click does nothing. Left-click does nothing. Tab/backtick/R do nothing. F4/F5 still work (editor toggles).
+No partial actions across turn boundaries in M3a. If a character's queue sums to more than 10s, that's a planning bug we should have prevented with the disabled-menu logic from M2. Don't try to handle "action runs into next turn" in M3a.
+
+What to build
+TurnManager: COMMIT phase
+autoloads/turn_manager.gd already has phase transitions from earlier. Add a COMMIT phase to the enum if not already there. Phase order: PLANNING → COMMIT → PLANNING → COMMIT → .... (Predict is M3b — leave it as-is for now.)
+Add:
+
+commit_turn() — emits phase_changed(COMMIT), then awaits a signal indicating commit complete, then advances mission timer by TURN_DURATION, then transitions to PLANNING for the next turn.
+Signal commit_finished() — emitted by main.gd once all character animations finish.
+start_first_turn() from M2 stays the same.
+
+GameManager: timer advance
+autoloads/game_manager.gd should already have the mission timer (time_remaining, set by start_mission(60.0)). Add:
+
+advance_timer(seconds: float) -> void — subtracts seconds from time_remaining, clamps at 0, emits a time_changed signal. If timer hits 0, also emit mission_ended().
+
+Action visual execution — port action_*.gd
+Each action class needs an execute_visual(character: PlayerCharacter, scene_root: Node) -> Tween method that:
+
+Creates a tween.
+Animates whatever the action does (move along path / squash for pick lock / squash for pickup).
+Returns the tween for the caller to await.
+
+Reference the old code's patterns:
+action_move.gd:
+gdscriptfunc execute_visual(character: PlayerCharacter, scene_root: Node) -> Tween:
+    var tween := scene_root.create_tween()
+    var anim_dur := cost / GameManager.ANIMATION_SPEED_MULTIPLIER
+    tween.tween_method(
+        func(t: float) -> void: character.set_logical_pos(path.position_at(t)),
+        0.0, 1.0, anim_dur
+    )
+    return tween
+action_pick_lock.gd:
+Squash-stretch the character (scale x by 0.85, then back to 1.0) while the lock animation runs. At the end, call level.unlock_chest(). Reference old code for exact tween shape — keep the visual identical.
+action_pickup.gd:
+Similar squash-stretch, plus character.carried_kg += action.item_kg at the end. The chest sprite should hide on completion (level.pickup_chest()).
+Action visual execution does NOT update logical_pos directly except via the move tween. Pick lock / pickup happen in place.
+PlayerCharacter: commit_actions
+Add to scripts/player_character.gd:
+gdscriptfunc commit_actions(scene_root: Node) -> Tween:
+    var queue: Array = ActionQueue.get_queue(char_id)
+    if queue.is_empty():
+        return null
+    var master := scene_root.create_tween()
+    for action_obj in _action_objects:
+        var sub_tween: Tween = action_obj.execute_visual(self, scene_root)
+        if sub_tween:
+            master.tween_subtween(sub_tween)
+    return master
+The tween_subtween chains tweens sequentially — action 1 finishes, then action 2 starts. Each character runs its own master tween. The three master tweens (one per character) run in parallel because each is independent.
+Add clear_queue_after_commit():
+
+Clears _action_objects.
+Calls ActionQueue.clear(char_id).
+Resets _carried_kg only if pickup didn't happen (pickup persists carried weight to next turn — that's M4 design).
+
+main.gd: commit pressed
+Wire the Commit button:
+gdscriptfunc _on_commit_pressed() -> void:
+    if GameManager.current_phase != GameManager.Phase.PLANNING:
+        return
+    _context_menu.close()
+    for ch in _characters:
+        ch._path_preview_for_self_clear()  # or however path preview is cleared
+    _path_preview.clear_all()
+    _input_locked = true
+    _hud.set_phase("COMMIT")
+    await _run_commit()
+    _input_locked = false
+    _hud.set_phase("PLANNING")
+
+func _run_commit() -> void:
+    # Start each character's master tween in parallel
+    var character_tweens: Array[Tween] = []
+    for ch in _characters:
+        var t := ch.commit_actions(self)
+        if t:
+            character_tweens.append(t)
+    # Wait for all to finish
+    for t in character_tweens:
+        await t.finished
+    # Clear queues, advance turn
+    for ch in _characters:
+        ch.clear_queue_after_commit()
+    GameManager.advance_timer(GameManager.TURN_DURATION)
+    TurnManager.start_next_turn()
+    _update_hud()
+Add an _input_locked: bool field. In _unhandled_input, early-return if _input_locked. The whole input cascade (left-click, right-click, Tab, R, backtick) is gated by this flag.
+TurnManager.start_next_turn
+Advances turn counter, emits turn_started(turn_number). Resets per-turn state on each character (whatever needs resetting — for M3a, just verify queues are clear and time-used resets to 0).
+HUD: phase indicator
+Add a phase label to the HUD: "PLANNING" in green during planning, "COMMITTING..." in orange during commit. Method _hud.set_phase(name: String).
+The Commit button is enabled only during PLANNING with at least one character having queued actions. Disabled otherwise.
+Bug to fix while you're in there: M2 left the Commit button visually enabled but with no signal. Now it has a signal — confirm the button's pressed signal connects to _on_commit_pressed exactly once.
+Path preview clears on commit
+When commit starts, the path preview (those colored lines showing planned moves) clear immediately so the player sees the actual movement, not the plan.
+Mission ended state
+When GameManager.time_remaining hits 0:
+
+HUD shows "TIME UP" or similar.
+Commit button greys out permanently.
+Right-click cascade returns immediately (no menu).
+Tab still works (player can look around).
+
+Don't add restart logic. The game just freezes at game-over. That's M4.
+Constraints
+
+Don't touch Pathfinder, MovePath, PathSmoother, IsoMath, level geometry. Those are correct.
+Don't add anything Predict-related. No guards, no CCTVs, no FOV. M3b.
+Don't change tests/test_pathing.gd or test_time_calculator.gd.
+Action animations should NOT teleport the character at the start. The character is at logical_pos; the move tween starts there and ends at the path's last waypoint, smoothly. If you see characters jump, the tween is being constructed wrong.
+logical_pos is the source of truth during commit. Each set_logical_pos(p) call updates both the world position and triggers _draw redraws via queue_redraw(). Tweens drive set_logical_pos, not position directly.
+EditMode and LightMode keep working during planning. They don't open during commit (input locked).
+
+Tests
+Add tests/test_commit.gd:
+
+commit_advances_timer: queue an action, simulate commit (without actually running tweens — just call clear_queue_after_commit and advance_timer), assert time_remaining decreased by 10s.
+commit_clears_queue: queue 2 actions, call clear_queue_after_commit, assert queue size is 0.
+mission_ends_at_zero: set time_remaining to 5, advance_timer(10), assert time_remaining is 0 and mission_ended was emitted.
+commit_disabled_during_commit_phase: set phase to COMMIT, call _on_commit_pressed, assert nothing happened (queue still has actions, timer didn't change).
+
+Update tests/run_tests.bat to include test_commit.gd.
+Before you start
+Read the reference files from main, then propose your plan in 8–12 bullets. Two things to specifically address in your plan:
+
+How tween chaining works for parallel-character / sequential-actions-per-character. Explain the data flow: 3 master tweens (one per character) running in parallel, each containing N subtweens (one per queued action) running sequentially.
+How await t.finished works in your design. Confirm _run_commit correctly waits for the slowest character to finish before advancing the turn.
+
+Wait for my approval before writing files. After approval, implement in one pass and run all tests.
+Done criteria
+When you stop, the running game should:
+
+Queue actions on multiple characters.
+Click Commit. Path previews clear. Phase label shows "COMMITTING…". All characters animate in parallel: movers move along paths, lockpickers squash-stretch in place, pickup-ers squash and chest disappears.
+After ~2 real seconds (10s × ANIMATION_SPEED_MULTIPLIER), animation ends.
+Mission timer drops by 10s.
+Phase returns to "PLANNING". Characters' queues are empty. Time-used resets to 0 per character. Action queues in HUD are blank.
+Players can right-click and queue new actions — second turn works identically.
+After 6 turns, timer hits 0, "TIME UP" shows, Commit button greyed permanently.
+EditMode (F4) / LightMode (F5) still work.
+All test files pass.
+
+Stop and report. Don't proceed to M3b.

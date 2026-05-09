@@ -2,6 +2,8 @@ extends Node2D
 
 const _Character := preload("res://scripts/character.gd")
 
+signal _commit_done()
+
 var _level: Node2D
 var _characters: Array = []   # Array[PlayerCharacter]
 var _selected_idx: int = 0
@@ -9,6 +11,8 @@ var _selected_idx: int = 0
 var _path_preview: PathPreview
 var _context_menu: ContextMenu
 var _hud: HUD
+
+var _input_locked: bool = false
 
 # Callables matched to the labels shown in the last context menu
 var _pending_actions: Array = []
@@ -41,11 +45,18 @@ func _ready() -> void:
 
 	_hud = preload("res://scenes/ui/hud.tscn").instantiate()
 	add_child(_hud)
+	_hud.commit_pressed.connect(_on_commit_pressed)
+
+	GameManager.start_mission(60.0)
+	GameManager.mission_ended.connect(_on_mission_ended)
 
 	_select(0)
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _input_locked:
+		return
+
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_TAB:
@@ -106,6 +117,8 @@ func _make_item(label: String, enabled: bool) -> Dictionary:
 
 
 func _on_right_click() -> void:
+	if not GameManager.mission_active:
+		return
 	_context_menu.close()
 	_pending_actions.clear()
 	var items: Array = []
@@ -119,7 +132,6 @@ func _on_right_click() -> void:
 		if i == _selected_idx:
 			continue
 		if world_pos.distance_to(_characters[i].logical_pos) < 0.4:
-			# M2: no actions for other characters yet
 			return
 
 	# 2. Chest nearby (1.5 m)?
@@ -143,6 +155,57 @@ func _on_action_selected(idx: int) -> void:
 	if idx >= 0 and idx < _pending_actions.size():
 		_pending_actions[idx].call()
 	_pending_actions.clear()
+
+
+# ── Commit phase ──────────────────────────────────────────────────────────────
+
+func _on_commit_pressed() -> void:
+	if GameManager.phase != GameManager.Phase.PLANNING or _input_locked:
+		return
+	_context_menu.close()
+	_path_preview.clear_all()
+	_input_locked = true
+	_hud.set_phase("COMMITTING...")
+	_run_commit()
+
+
+func _run_commit() -> void:
+	var tweens: Array[Tween] = []
+	for ch in _characters:
+		var t := (ch as PlayerCharacter).commit_actions(self)
+		if t != null:
+			tweens.append(t)
+
+	if tweens.is_empty():
+		_after_commit()
+		return
+
+	var counter: Array = [tweens.size()]
+	for t in tweens:
+		t.finished.connect(func() -> void:
+			counter[0] -= 1
+			if counter[0] == 0:
+				_commit_done.emit()
+		)
+
+	await _commit_done
+	_after_commit()
+
+
+func _after_commit() -> void:
+	for ch in _characters:
+		var pc := ch as PlayerCharacter
+		pc.clear_queue_after_commit()
+	GameManager.advance_timer(GameManager.TURN_BUDGET_S)
+	TurnManager.start_next_turn()
+	_input_locked = false
+	_update_hud()
+	_hud.set_phase("PLANNING")
+
+
+func _on_mission_ended() -> void:
+	_input_locked = true
+	_hud.set_phase("TIME UP")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -244,11 +307,14 @@ func _build_chest_items(items: Array, chest_center: Vector2, pc: PlayerCharacter
 				label = "Pick Lock — not enough time  (%.1fs needed)" % lock_cost
 		items.append(_make_item(label, enabled))
 		var captured_move := move_path
+		var captured_level := _level
 		_pending_actions.append(func() -> void:
 			if captured_move != null:
 				pc.queue_action(ActionMove.new(pc, captured_move))
 				_path_preview.set_paths(pc.char_id, pc.get_move_paths())
-			pc.queue_action(ActionPickLock.new(pc, complexity, "mechanical", chest_center))
+			var pick_lock := ActionPickLock.new(pc, complexity, "mechanical", chest_center)
+			pick_lock.on_complete = func(): captured_level.unlock_chest()
+			pc.queue_action(pick_lock)
 			_update_hud()
 		)
 	else:
@@ -274,11 +340,14 @@ func _build_chest_items(items: Array, chest_center: Vector2, pc: PlayerCharacter
 				label = "Pick Up Chest — not enough time  (%.1fs needed)" % pickup_cost
 		items.append(_make_item(label, enabled))
 		var captured_move := move_path
+		var captured_level := _level
 		_pending_actions.append(func() -> void:
 			if captured_move != null:
 				pc.queue_action(ActionMove.new(pc, captured_move))
 				_path_preview.set_paths(pc.char_id, pc.get_move_paths())
-			pc.queue_action(ActionPickUp.new(pc, "chest", chest_kg, 1000.0))
+			var pickup := ActionPickUp.new(pc, "chest", chest_kg, 1000.0)
+			pickup.on_complete = func(): captured_level.pickup_chest()
+			pc.queue_action(pickup)
 			_update_hud()
 		)
 

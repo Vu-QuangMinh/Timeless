@@ -14,13 +14,11 @@ func _init(pc, p: MovePath) -> void:
 	cost = TimeCalculator.move_time(p.total_length(), agi, weight)
 
 
-# execute_visual / undo_visual exist but are NOT called in M2 planning phase.
-func execute_visual(char) -> void:
-	var duration := maxf(cost, 0.01)
-	var tween: Tween = char.create_tween()
-	tween.tween_method(
-		func(t: float) -> void: char.set_logical_pos(path.position_at(t)),
-		0.0, 1.0, duration
+func execute_visual(_char, _tween: Tween) -> void:
+	var captured := path
+	_tween.tween_method(
+		func(t: float) -> void: _char.set_logical_pos(captured.position_at(t)),
+		0.0, 1.0, get_animation_duration()
 	)
 
 

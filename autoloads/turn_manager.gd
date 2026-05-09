@@ -23,3 +23,10 @@ func commit() -> void:
 	GameManager.phase = GameManager.Phase.PLANNING
 	turn_started.emit(turn_index)
 	phase_changed.emit(GameManager.phase)
+
+
+func start_next_turn() -> void:
+	turn_index += 1
+	GameManager.phase = GameManager.Phase.PLANNING
+	phase_changed.emit(GameManager.phase)
+	turn_started.emit(turn_index)

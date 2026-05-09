@@ -4,9 +4,14 @@ extends RefCounted
 var char_id: int = 0
 var action_type: String = ""
 var cost: float = 0.0
+var on_complete: Callable = Callable()
 
 
-func execute_visual(_char) -> void:
+func get_animation_duration() -> float:
+	return cost / GameManager.ANIMATION_SPEED_MULTIPLIER
+
+
+func execute_visual(_char, _tween: Tween) -> void:
 	pass
 
 

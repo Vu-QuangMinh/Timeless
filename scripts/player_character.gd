@@ -75,6 +75,22 @@ func get_turn_time_remaining() -> float:
 	return GameManager.TURN_BUDGET_S - get_turn_time_used()
 
 
+func commit_actions(scene_root: Node) -> Tween:
+	if _action_objects.is_empty():
+		return null
+	var t: Tween = scene_root.create_tween()
+	for action in _action_objects:
+		action.execute_visual(self, t)
+	return t
+
+
+func clear_queue_after_commit() -> void:
+	_action_objects.clear()
+	ActionQueue.reset(char_id)
+	scale = Vector2.ONE
+	emit_signal("time_remaining_changed", char_id, get_turn_time_remaining())
+
+
 func get_move_paths() -> Array:
 	var paths := []
 	for a in _action_objects:

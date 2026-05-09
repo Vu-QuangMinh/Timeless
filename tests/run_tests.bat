@@ -20,6 +20,11 @@ echo === Actions ===
 if errorlevel 1 set FAIL=1
 
 echo.
+echo === Commit ===
+%GODOT% --headless --path "%PROJECT%" -s tests/test_commit.gd
+if errorlevel 1 set FAIL=1
+
+echo.
 if %FAIL%==0 (
     echo ALL TESTS PASSED
     exit /b 0
