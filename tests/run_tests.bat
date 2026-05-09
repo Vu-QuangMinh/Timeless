@@ -15,6 +15,11 @@ echo === Pathing ===
 if errorlevel 1 set FAIL=1
 
 echo.
+echo === Actions ===
+%GODOT% --headless --path "%PROJECT%" -s tests/test_actions.gd
+if errorlevel 1 set FAIL=1
+
+echo.
 if %FAIL%==0 (
     echo ALL TESTS PASSED
     exit /b 0

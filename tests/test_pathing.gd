@@ -62,6 +62,31 @@ func _init() -> void:
 			no_cross = false
 	ok = _check("corner-cut: no segment crosses wall", no_cross, ok)
 
+	# --- Sprite-derived wall geometry ---
+	# Wall_Y world coords from analyze_walls.py: roughly constant x ≈ −5 m,
+	# spanning y −11.94 → 3.55.  Points on opposite sides must route around it.
+	var wy_wall := [{"a": Vector2(-5.81, -11.94), "b": Vector2(-4.54, 3.55)}]
+	var pf_wy := Pathfinder.new()
+	pf_wy.setup(wy_wall, [])
+	var path_wy := pf_wy.find_path(Vector2(0.0, -4.0), Vector2(-8.0, -4.0))
+	ok = _check("sprite wall: path found across Wall_Y", not path_wy.is_empty(), ok)
+	var no_wy_cross := true
+	for i in range(path_wy.size() - 1):
+		if Pathfinder._segs_intersect(path_wy[i], path_wy[i + 1],
+				Vector2(-5.81, -11.94), Vector2(-4.54, 3.55)):
+			no_wy_cross = false
+	ok = _check("sprite wall: path does not cross Wall_Y", no_wy_cross, ok)
+
+	# Snap pass: two segments sharing a corner within 0.05 m must get identical endpoints.
+	var seg_a := {"a": Vector2(-4.55, 3.57), "b": Vector2(0.28, 4.45)}
+	var seg_b := {"a": Vector2(-5.81, -11.94), "b": Vector2(-4.54, 3.55)}
+	var pf_snap := Pathfinder.new()
+	pf_snap.setup([seg_a, seg_b], [])
+	var snapped_corner_a: Vector2 = pf_snap._wall_segs[0]["a"]
+	var snapped_corner_b: Vector2 = pf_snap._wall_segs[1]["b"]
+	ok = _check("snap: shared corner endpoints are identical after setup",
+		snapped_corner_a == snapped_corner_b, ok)
+
 	# --- MovePath ---
 
 	var seg := MovePath.Segment.new()

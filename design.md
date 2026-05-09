@@ -267,3 +267,188 @@ A square isometric room with **40m edges**.
 - Predict phase: guard AI decision logic.
 - Commit phase: action resolution and animation playback.
 - Partial actions (action overflows turn boundary).
+ 
+ Milestone 2 — Action system, UI, three characters
+M1 + M1.5 are done: iso world coordinates work, walls are real barriers, one character can pathfind by left-click. Now we add the planning-phase gameplay loop: three characters, the action queue, undo/reset, the right-click context menu, and a HUD time bar.
+Out of scope for M2: guards, CCTVs, Predict phase, Commit phase animations, win/lose. M2 ends in Planning phase with a working time budget.
+Reference: the old code on main branch
+Most of M2's structure already existed on the main branch before the rewrite. Read these files for behavioral spec — adapt to the new iso world conventions, do not blindly copy:
+
+git show main:scripts/main.gd — selection, Tab cycle, ` undo, R reset, right-click context menu cascade, action execution dispatch
+git show main:scripts/player_character.gd — selection state, action queue per character, turn time accounting
+git show main:scripts/character.gd — class definitions and stat blocks (already partially ported)
+git show main:scripts/actions/action_base.gd and the action_*.gd files — port verbatim, they're coordinate-agnostic
+git show main:scenes/ui/hud.gd and hud.tscn — port near-verbatim, the HUD doesn't care about coord space
+git show main:scripts/ui/context_menu.gd and context_menu.tscn — port verbatim
+git show main:scripts/ui/path_preview.gd and path_preview.tscn — port; needs a small change to project from world to screen for drawing
+
+Files to NOT touch:
+
+Anything in autoloads/ (already correct from M1)
+scripts/pathing/* (already correct from M1.5)
+scenes/level_1/* (already correct from M1.5)
+scripts/EditMode.gd, scripts/light_mode.gd, scripts/camera_zoom.gd
+
+Locked design decisions
+
+Character spawn positions in main.gd: three characters spawn just inside the door at world (1.44, 3.56), slightly spread out. Suggested: Brawler at (0.6, 3.0), Cat Burglar at (1.44, 3.0), Hacker at (2.3, 3.0). Each ~0.7m apart, none overlapping the door.
+Selection: click a character with left mouse to select. Tab cycles through characters in order. Selected character renders with a white ring around it.
+Right-click priority cascade at the clicked world position (in this order, first match wins):
+
+Self / other character: ignore (return without opening menu).
+Chest (within CHEST_CLICK_R of _level.get_chest_obstacle().center): show "Pick Lock" / "Pick Up" / "Move + Pick Lock" / "Move + Pick Up" depending on range.
+Floor (anywhere else): show "Move here" with cost.
+Out of bounds (outside room): no menu opens.
+
+Hack-Door, Hack-CCTV, Takedown, Hold-Hostage menus are M3/M4 — skip in M2.
+Click radii in world meters (not pixels):
+
+CHEST_CLICK_R = 1.5 (m) — generous click target around the 0.75m chest
+ACTION_REACH_PX from old code becomes ACTION_REACH = 0.5 (m)
+Character self-click hit radius = 0.4 (m)
+
+
+Per-turn time budget: each character has 10 seconds per turn (GameManager.TURN_DURATION = 10.0). Actions that exceed remaining budget are shown disabled in the menu (greyed out, with cost in the label).
+The mission timer runs from the moment the game starts. GameManager.start_mission(60.0) was called in M1; M2 keeps it. The HUD shows total time remaining.
+Compound actions: "Move + Pick Lock" queues two actions back-to-back: an ActionMove to an approach position near the chest, then an ActionPickLock. Same for "Move + Pick Up". The approach position is along the line from character to chest, at distance chest_radius + CHAR_RADIUS + 0.05m from the chest center.
+Action queue is the source of truth. When a character has queued actions, their logical_pos is still their pre-queue position; the queue stores actions with their costs. Time spent is the sum of cost across queued actions for that character. The character only physically moves during Commit phase (which is M3 — for M2 actions just sit in the queue).
+For M2, "Commit" button is disabled-ish. Add the button to HUD but pressing it does nothing (or prints a message). M3 wires it up.
+Predict button is disabled in M2. Add it but it does nothing.
+Undo (`) removes the last action from the currently selected character's queue. Reset (R) clears all queues for all characters.
+
+What to build
+Action classes
+Port verbatim from main branch (they're coordinate-agnostic):
+
+scripts/actions/action_base.gd (class ActionBase)
+scripts/actions/action_move.gd (class ActionMove) — the path field is now MovePath in world meters, no other change
+scripts/actions/action_pick_lock.gd (class ActionPickLock)
+scripts/actions/action_pickup.gd (class ActionPickUp)
+
+Skip these for M2 (they go in M3/M4): action_hack.gd, action_takedown.gd, action_hold_hostage.gd. Don't create them yet.
+PlayerCharacter additions
+Update scripts/player_character.gd:
+
+Add character_id: int, character_class: Character.CharacterClass, selected: bool.
+Add stat fields read from class: stat_str, stat_int, stat_agi, base_weight_kg, carried_weight_kg. Initialize from Character.get_stats(character_class) (port from main:scripts/character.gd).
+Add effective_weight() -> float returning base_weight_kg + carried_weight_kg.
+Add action queue methods: queue_action(a), queue_actions(arr), undo_last_action(), reset_turn_actions(), get_queued_actions(), get_turn_time_used() -> float, get_turn_time_remaining() -> float. The queue itself is delegated to the ActionQueue autoload, keyed by character_id.
+Add select(), deselect() that flip selected and queue_redraw().
+In _draw(), draw a white ring around the character if selected (1px wider than the class circle).
+Class color: Brawler red #dc4444, Cat Burglar dark grey #2c2c34, Hacker green #5acb5d. Adjust the existing draw_circle to use class color instead of hardcoded blue.
+Add a small name label drawn above the character (text = Character.class_name(character_class) or just "Brawler"/"Cat Burglar"/"Hacker"). Use ThemeDB.fallback_font at size 10.
+
+Selection and input — main.gd
+Replace M1's single-character main.gd with the three-character version. Reference git show main:scripts/main.gd for the selection logic and right-click cascade structure. Adapt to iso world coords:
+
+Spawn three characters at the positions in design decision #1.
+Track _selected_index: int, _characters: Array[PlayerCharacter].
+Left-click in empty space: do nothing (M1's "click-to-move" is replaced by the right-click menu).
+Left-click on a character: select it.
+Tab: cycle selection.
+Backtick (KEY_QUOTELEFT): undo selected character's last action.
+R: reset all character queues.
+Right-click anywhere: run the priority cascade, build action items, show the context menu.
+Mouse positions: always go through IsoMath.unproject() to get world meters.
+
+Hit-testing for character self-click uses world distance: world_pos.distance_to(ch.logical_pos) <= 0.4.
+Context menu — port and adapt
+Port scripts/ui/context_menu.gd and scenes/ui/context_menu.tscn verbatim. The menu is a Control on a CanvasLayer — works in screen space, no iso conversion needed.
+Item builders in main.gd:
+
+_build_move_items(world_pos, sel) — pathfind from sel.logical_pos to world_pos, return one menu item with cost = path.time_cost(sel.stat_agi, sel.effective_weight()). Disabled if cost > remaining.
+_build_chest_items(sel) — chest center from _level.get_chest_obstacle().center. If chest locked: show pick lock cost. Show pickup cost. If sel.logical_pos within action range, item is a single action; else compound "Move + X" item that pathfinds first.
+
+Skip _build_guard_items, _build_hack_items — those are M3/M4.
+Action execution in main.gd::_on_action_selected(action_type, data):
+
+"move" — instantiate ActionMove, set character_id, cost, path from data, call sel.queue_action(action).
+"pick_lock" — instantiate ActionPickLock, queue.
+"pickup" — instantiate ActionPickUp, queue.
+"move_pick_lock" — queue [ActionMove, ActionPickLock] together via queue_actions(...).
+"move_pickup" — queue [ActionMove, ActionPickUp] together.
+
+Path preview
+Port scripts/ui/path_preview.gd and scenes/ui/path_preview.tscn. The preview was screen-space; in iso world it needs to project waypoints to screen for drawing. In path_preview.gd::_draw(), where it draws the path, replace seg_a / seg_b with IsoMath.project(seg_a) / IsoMath.project(seg_b) before draw_line.
+The preview is shown when a context menu is open with a move-containing item enabled, hidden when the menu closes.
+Chest as a real obstacle
+The chest is at world (3.22, -4.19) per M1.5. Add chest state to level_1.gd:
+
+chest_locked: bool = true
+chest_picked_up: bool = false
+Methods: unlock_chest(), pickup_chest() (sets picked_up flag).
+
+Update get_chest_obstacle() to return {center: (3.22, -4.19), radius: 0.0} if chest_picked_up, else {center: (3.22, -4.19), radius: 0.75}.
+Note: the chest stays an obstacle for pathfinding even after pickup is queued (since queueing is planning, not committing). M2 doesn't actually execute the pickup; that's M3.
+Update level_1.gd::_draw() to render the chest indicator as gold if locked, grey if unlocked, hidden if picked up. Sets the visual signal during planning.
+HUD
+Port scenes/ui/hud.gd and scenes/ui/hud.tscn. Adaptations:
+
+Time bar shows mission time remaining (GameManager.time_remaining).
+Per-character panel shows: name, class color square, time used / total per turn, list of queued actions (just labels, e.g., "Move (3.2s)", "Pick Lock (6.0s)").
+Predict button: present, disabled.
+Commit button: present, disabled.
+Selected character is highlighted in the HUD.
+HUD updates whenever queue changes (call _hud.update_selected_character(sel) after action add/undo/reset).
+
+Approach-position helper
+In main.gd, helper:
+func _approach_pos(target: Vector2, obs_radius: float, char_pos: Vector2) -> Vector2:
+    var dir := char_pos - target
+    if dir.length_squared() < 0.01:
+        dir = Vector2(0.0, 1.0)
+    return target + dir.normalized() * (obs_radius + Pathfinder.CHAR_RADIUS + 0.05)
+Used by _build_chest_items to find where to stop on the way to the chest.
+TimeCalculator usage
+All cost computations call into TimeCalculator:
+
+Move: path.time_cost(sel.stat_agi, sel.effective_weight()) (which internally uses TimeCalculator.move_time per segment).
+Pick lock: TimeCalculator.lock_time(1, sel.stat_agi, sel.stat_str) (lock level 1, glass type — M2 keeps the chest as a single lock level).
+Pick up: TimeCalculator.pickup_time(item_kg, sel.stat_str, sel.stat_int) where item_kg = 60.0 if locked, 10.0 if unlocked (chest is heavy because of the lock weight per old code; you'll see this in _build_chest_items on main).
+
+Constraints
+
+Don't touch the iso math, the pathfinder, or the level walls. Those are correct.
+The character's position field stays driven by IsoMath.project(logical_pos) as established in M1. Don't add direct position writes anywhere except via set_logical_pos().
+Don't implement Predict, Commit, guards, CCTVs, or any action playback. That's M3+.
+Don't modify EditMode or LightMode. They still work as-is.
+All click radii and ranges in world meters. No *_PX constants in main.gd or level_1.gd. (EditMode and LightMode keep their internal pixel math, that's fine.)
+Keep the M1.5 chest centroid (3.22, -4.19). Don't move it.
+
+Tests
+Add a new test file tests/test_actions.gd with these cases:
+
+Queueing one move action: queue size becomes 1, get_turn_time_used() matches the action's cost.
+Queueing two actions: queue size 2, time used = sum.
+undo_last_action() removes the last entry, time used decreases.
+reset_turn_actions() empties the queue.
+get_turn_time_remaining() returns TURN_DURATION - used.
+
+Don't add UI tests — the menu/HUD aren't unit-testable headlessly.
+Update tests/run_tests.bat to run the new test file in addition to existing two.
+Before you start
+Read the reference files from main (listed above), then propose your implementation plan in 10–15 bullets, in order of file creation. Wait for me to approve before writing files. After approval, implement in one pass and run all tests headlessly.
+Done criteria (what we'll verify)
+When you stop, the running game should:
+
+Show three characters near the door: red Brawler, dark Cat Burglar, green Hacker, each labeled.
+Click a character → white ring appears (selected). Click another → ring moves.
+Tab → cycles selection through all three.
+Right-click on the floor far from any object → menu shows "Move here, X.X s". Click → action queues, HUD updates.
+Right-click on the chest (gold circle) → menu shows "Pick Lock" and "Pick Up" or "Move + Pick Lock" / "Move + Pick Up" depending on whether the selected character is in range.
+Backtick (`) → last queued action removed, HUD updates.
+R → all queues reset, HUD shows empty queues for all three.
+HUD shows mission time counting down (or static at 60s — depending on whether GameManager.advance_timer runs in planning; M1 had it set up).
+Predict and Commit buttons visible but do nothing on press.
+F4 / F5 still toggle EditMode / LightMode.
+All three test files pass.
+
+Stop and report when done. List files created/modified. Don't proceed to M3.
+
+
+Send that to Claude Code.
+A few notes on what to expect:
+
+The reference files on main have a lot of code, especially main.gd (800 lines) and hud.gd (240 lines). Claude Code will probably want to copy chunks rather than write fresh — that's fine for HUD and context menu, less fine for main.gd because the new one needs iso-coord adaptations throughout. Watch for that in the plan.
+The action queue logic on main was tightly coupled to the old screen-space pathfinder. The hardest part of M2 is making sure the cost calculations all flow through world-meter distances cleanly. If Claude Code's plan has any * 32 or / 32 floating around, push back.
+The plan should include "implement test_actions.gd" as one of the bullets. If it doesn't, push back.

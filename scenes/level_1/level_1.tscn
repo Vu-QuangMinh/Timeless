@@ -13,15 +13,15 @@ script = ExtResource("1_lvl1")
 [node name="Background" type="Node2D" parent="."]
 z_index = -1
 
-[node name="Floor" type="Sprite2D" parent="Background"]
+[node name="Floor" type="Sprite2D" parent="Background" groups=["editable"]]
 scale = Vector2(0.5307, 0.5307)
 texture = ExtResource("2_floor")
 
-[node name="Wall_X" type="Sprite2D" parent="Background"]
+[node name="Wall_X" type="Sprite2D" parent="Background" groups=["editable"]]
 scale = Vector2(0.5307, 0.5307)
 texture = ExtResource("3_wallx")
 
-[node name="Wall_Y" type="Sprite2D" parent="Background"]
+[node name="Wall_Y" type="Sprite2D" parent="Background" groups=["editable"]]
 scale = Vector2(0.5307, 0.5307)
 texture = ExtResource("4_wally")
 

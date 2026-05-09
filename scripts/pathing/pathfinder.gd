@@ -1,15 +1,34 @@
 class_name Pathfinder
 
-const CHAR_RADIUS := 0.5  # meters
-const EPSILON := 0.03     # meters
+const CHAR_RADIUS := 0.5   # meters
+const EPSILON     := 0.03  # meters
+const SNAP_DIST   := 0.05  # meters — endpoints closer than this are merged
 
 var _wall_segs: Array = []   # Array of {a: Vector2, b: Vector2}
 var _obstacles: Array = []   # Array of {center: Vector2, radius: float}
 
 
 func setup(wall_segs: Array, obstacles: Array) -> void:
-	_wall_segs = wall_segs
+	_wall_segs = wall_segs.duplicate(true)  # deep copy so snap doesn't mutate caller data
 	_obstacles = obstacles
+	_snap_wall_endpoints()
+
+
+# Snap any two wall-segment endpoints that are within SNAP_DIST of each other
+# to their average, guaranteeing bit-identical shared corners between adjacent
+# segments and preventing ghost-LOS slivers at joints.
+func _snap_wall_endpoints() -> void:
+	var n := _wall_segs.size()
+	for i in range(n):
+		for j in range(i + 1, n):
+			for ea in ["a", "b"]:
+				for eb in ["a", "b"]:
+					var pa: Vector2 = _wall_segs[i][ea]
+					var pb: Vector2 = _wall_segs[j][eb]
+					if pa.distance_to(pb) <= SNAP_DIST:
+						var avg := (pa + pb) * 0.5
+						_wall_segs[i][ea] = avg
+						_wall_segs[j][eb] = avg
 
 
 func find_path(from: Vector2, to: Vector2) -> Array:
