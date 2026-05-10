@@ -2,9 +2,24 @@ extends Node
 
 # F6 Asset Editor — runtime tool for authoring collision (red) and recognition
 # (yellow) polygons on PNG sprites. Personal use only, debug/editor-only.
-# Phase 2: full editor UI with PNG load, drawing tools, polygon list, zoom.
+# Phase 3: PNG load, drawing tools, save (Ctrl+S) and load (Ctrl+O) assets.
 
 const PreviewScript := preload("res://scripts/asset_editor_preview.gd")
+const SobelNormal := preload("res://scripts/util/sobel_normal.gd")
+
+const PALETTE_ROOT := "res://assets/palette"
+const TEMPLATES_ROOT := "res://scripts/templates"
+const CATEGORIES := ["Camera", "Enemy", "Wall", "Door", "Lock", "Artifact"]
+# Z-priority for hover-disambiguation; read by gameplay later via metadata.
+const RECOGNITION_PRIORITY := {
+	"Floor": 0,
+	"Wall": 10,
+	"Door": 20,
+	"Lock": 20,
+	"Artifact": 30,
+	"Camera": 40,
+	"Enemy": 50,
+}
 
 # Always-visible shortcut help table (panel rendered in Phase 4).
 const SHORTCUTS := [
@@ -16,8 +31,12 @@ const SHORTCUTS := [
 	{"category": "Drawing", "key": "Enter",        "desc": "Close polygon"},
 	{"category": "Drawing", "key": "Esc",          "desc": "Cancel current polygon"},
 	{"category": "View",    "key": "Mouse Wheel",  "desc": "Adjust zoom"},
+	{"category": "File",    "key": "Ctrl+S",       "desc": "Save asset"},
+	{"category": "File",    "key": "Ctrl+O",       "desc": "Load asset"},
 	{"category": "Mode",    "key": "F6",           "desc": "Toggle Asset Editor"},
 ]
+
+const ShortcutPanelBuilder := preload("res://scripts/util/shortcut_panel.gd")
 
 const TOOL_NONE := 0
 const TOOL_RED := 1
@@ -34,6 +53,7 @@ var _dirty: bool = false
 
 # Editor data
 var _texture: Texture2D = null
+var _image: Image = null  # source pixels, kept for save (avoids texture→image round trip)
 var _texture_filename: String = ""
 var _polygons: Array = []  # [{type: "collision"|"recognition", vertices: PackedVector2Array}]
 var _in_progress: PackedVector2Array = PackedVector2Array()
@@ -57,6 +77,18 @@ var _exit_confirm: ConfirmationDialog = null
 var _load_dialog: FileDialog = null
 var _load_discard_confirm: ConfirmationDialog = null
 var _pending_load_path: String = ""
+
+# Save Asset dialog
+var _save_dialog: ConfirmationDialog = null
+var _save_name_edit: LineEdit = null
+var _save_category_btn: OptionButton = null
+var _save_sobel_check: CheckBox = null
+var _save_error_label: Label = null
+
+# Load Asset dialog
+var _asset_browser: ConfirmationDialog = null
+var _asset_browser_list: ItemList = null
+var _asset_browser_entries: Array = []  # [{category, name, json_path}]
 
 
 func _ready() -> void:
@@ -116,6 +148,71 @@ func _build_ui() -> void:
 	_load_discard_confirm.ok_button_text = "Discard"
 	_load_discard_confirm.confirmed.connect(_on_load_discard_confirmed)
 	_ui_layer.add_child(_load_discard_confirm)
+
+	_build_save_dialog()
+	_build_asset_browser()
+
+
+func _build_save_dialog() -> void:
+	_save_dialog = ConfirmationDialog.new()
+	_save_dialog.title = "Save Asset"
+	_save_dialog.ok_button_text = "Save"
+	_save_dialog.min_size = Vector2i(360, 200)
+	_save_dialog.confirmed.connect(_on_save_dialog_confirmed)
+	_ui_layer.add_child(_save_dialog)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 8)
+	_save_dialog.add_child(v)
+
+	var name_lbl := Label.new()
+	name_lbl.text = "Asset name (lowercase + underscores)"
+	v.add_child(name_lbl)
+	_save_name_edit = LineEdit.new()
+	_save_name_edit.placeholder_text = "e.g. standard_camera"
+	_save_name_edit.text_changed.connect(_on_save_name_changed)
+	v.add_child(_save_name_edit)
+
+	var cat_lbl := Label.new()
+	cat_lbl.text = "Category"
+	v.add_child(cat_lbl)
+	_save_category_btn = OptionButton.new()
+	for cat in CATEGORIES:
+		_save_category_btn.add_item(cat)
+	v.add_child(_save_category_btn)
+
+	_save_sobel_check = CheckBox.new()
+	_save_sobel_check.text = "Generate normal map (Sobel)"
+	_save_sobel_check.button_pressed = true
+	v.add_child(_save_sobel_check)
+
+	_save_error_label = Label.new()
+	_save_error_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.5))
+	_save_error_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(_save_error_label)
+
+
+func _build_asset_browser() -> void:
+	_asset_browser = ConfirmationDialog.new()
+	_asset_browser.title = "Load Asset"
+	_asset_browser.ok_button_text = "Load"
+	_asset_browser.min_size = Vector2i(420, 360)
+	_asset_browser.confirmed.connect(_on_asset_browser_confirmed)
+	_ui_layer.add_child(_asset_browser)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 6)
+	_asset_browser.add_child(v)
+
+	var lbl := Label.new()
+	lbl.text = "Assets under res://assets/palette/"
+	v.add_child(lbl)
+
+	_asset_browser_list = ItemList.new()
+	_asset_browser_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_asset_browser_list.custom_minimum_size = Vector2(380, 280)
+	_asset_browser_list.item_activated.connect(_on_asset_browser_item_activated)
+	v.add_child(_asset_browser_list)
 
 
 func _build_top_bar() -> Control:
@@ -266,6 +363,15 @@ func _build_right_panel() -> Control:
 	_polygon_list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_polygon_list_box.add_theme_constant_override("separation", 2)
 	scroll.add_child(_polygon_list_box)
+
+	# Always-visible shortcut help, sits below the polygon list. (F6's UI fully
+	# tiles the screen so a floating bottom-right corner conflicts with the
+	# status bar; integrating into the right panel keeps it visible without
+	# obscuring the preview.)
+	v.add_child(HSeparator.new())
+	var help := ShortcutPanelBuilder.build("F6 Shortcuts", SHORTCUTS)
+	help.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(help)
 
 	return bar
 
@@ -511,6 +617,7 @@ func _load_png(path: String) -> void:
 		return
 	var tex := ImageTexture.create_from_image(img)
 	_texture = tex
+	_image = img
 	_texture_filename = path.get_file()
 	_filename_label.text = _texture_filename
 	_polygons.clear()
@@ -557,6 +664,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				if _in_progress.size() >= 3:
 					_close_polygon()
 				get_viewport().set_input_as_handled()
+			KEY_S:
+				if event.ctrl_pressed:
+					_open_save_dialog()
+					get_viewport().set_input_as_handled()
+			KEY_O:
+				if event.ctrl_pressed:
+					_open_asset_browser()
+					get_viewport().set_input_as_handled()
 
 
 func _mark_dirty() -> void:
@@ -615,3 +730,352 @@ func _on_exit_discard() -> void:
 	_refresh_polygon_list()
 	_update_status_bar()
 	_force_deactivate()
+
+
+# ── Save Asset ──────────────────────────────────────────────────────────────
+
+func _open_save_dialog() -> void:
+	if _image == null:
+		_set_status_message("Load a PNG before saving", true)
+		return
+	if _save_error_label:
+		_save_error_label.text = ""
+	if _save_name_edit and _save_name_edit.text == "":
+		# Suggest a default name based on the loaded filename.
+		var stem := _texture_filename.get_basename().to_lower()
+		_save_name_edit.text = _sanitize_name(stem)
+	_save_dialog.popup_centered()
+
+
+func _on_save_name_changed(_text: String) -> void:
+	if _save_error_label:
+		_save_error_label.text = ""
+
+
+func _on_save_dialog_confirmed() -> void:
+	# res:// is read-only in exported builds — F6 is debug/editor-only.
+	var asset_name := _save_name_edit.text.strip_edges()
+	if not _is_valid_name(asset_name):
+		_save_error_label.text = "Name must be lowercase letters/digits/underscores, non-empty."
+		_save_dialog.popup_centered()
+		return
+	var category: String = CATEGORIES[_save_category_btn.selected]
+	var with_normal: bool = _save_sobel_check.button_pressed
+	var err := _save_asset(asset_name, category, with_normal)
+	if err != "":
+		_save_error_label.text = err
+		_save_dialog.popup_centered()
+		return
+	_dirty = false
+	_set_status_message("Saved: %s/%s" % [category, asset_name], false)
+
+
+func _save_asset(asset_name: String, category: String, with_normal: bool) -> String:
+	if _image == null:
+		return "No image loaded"
+	var dir := "%s/%s/%s" % [PALETTE_ROOT, category, asset_name]
+	var mk := DirAccess.make_dir_recursive_absolute(dir)
+	if mk != OK and mk != ERR_ALREADY_EXISTS:
+		return "Could not create %s (error %d)" % [dir, mk]
+	# Ensure templates folder exists too (per spec).
+	DirAccess.make_dir_recursive_absolute(TEMPLATES_ROOT)
+
+	var png_path := "%s/%s.png" % [dir, asset_name]
+	var save_err := _image.save_png(png_path)
+	if save_err != OK:
+		return "Failed to write %s (error %d)" % [png_path, save_err]
+
+	var normal_tex: Texture2D = null
+	if with_normal:
+		var normal_img := SobelNormal.generate(_image)
+		var normal_path := "%s/%s_normal.png" % [dir, asset_name]
+		var n_err := normal_img.save_png(normal_path)
+		if n_err != OK:
+			return "Failed to write %s (error %d)" % [normal_path, n_err]
+		normal_tex = ImageTexture.create_from_image(normal_img)
+
+	var diffuse_tex := ImageTexture.create_from_image(_image)
+	var ct := CanvasTexture.new()
+	ct.diffuse_texture = diffuse_tex
+	if normal_tex != null:
+		ct.normal_texture = normal_tex
+	var tres_path := "%s/%s.tres" % [dir, asset_name]
+	var ct_err := ResourceSaver.save(ct, tres_path)
+	if ct_err != OK:
+		return "Failed to write %s (error %d)" % [tres_path, ct_err]
+
+	var json_err := _write_borders_json(dir, asset_name)
+	if json_err != "":
+		return json_err
+
+	# Reload the saved CanvasTexture so the scene references it as an external
+	# resource (matters for ResourceSaver to write [ext_resource ...]).
+	var loaded_ct: CanvasTexture = load(tres_path)
+	var scene_err := _write_scene(dir, asset_name, category, loaded_ct)
+	if scene_err != "":
+		return scene_err
+	return ""
+
+
+func _write_borders_json(dir: String, asset_name: String) -> String:
+	var poly_array := []
+	for p in _polygons:
+		var verts: PackedVector2Array = p.get("vertices", PackedVector2Array())
+		var as_pairs := []
+		for v in verts:
+			as_pairs.append([v.x, v.y])
+		poly_array.append({
+			"type": p.get("type", "collision"),
+			"vertices": as_pairs,
+		})
+	var data := {
+		"version": 1,
+		"image": "%s.png" % asset_name,
+		"image_size": [int(_image.get_width()), int(_image.get_height())],
+		"polygons": poly_array,
+	}
+	var path := "%s/%s.borders.json" % [dir, asset_name]
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return "Failed to open %s for writing (error %d)" % [path, FileAccess.get_open_error()]
+	f.store_string(JSON.stringify(data, "\t"))
+	f.close()
+	return ""
+
+
+func _write_scene(dir: String, asset_name: String, category: String, ct: CanvasTexture) -> String:
+	var image_size := Vector2(_image.get_width(), _image.get_height())
+	var collision_polys: Array = []  # Array[PackedVector2Array]
+	var recognition_polys: Array = []
+	for p in _polygons:
+		var verts: PackedVector2Array = p.get("vertices", PackedVector2Array())
+		# CollisionPolygon2D.polygon must be offset by -image_size/2 so it aligns
+		# with a centered Sprite2D.
+		var centered := PackedVector2Array()
+		for v in verts:
+			centered.append(v - image_size * 0.5)
+		if p.get("type", "collision") == "recognition":
+			recognition_polys.append(centered)
+		else:
+			collision_polys.append(centered)
+
+	var pretty_name := asset_name.capitalize().replace(" ", "_")
+	var root := _build_category_root(category, pretty_name, ct, image_size, collision_polys, recognition_polys)
+	if root == null:
+		return "Unknown category %s" % category
+
+	root.set_meta("recognition_priority", RECOGNITION_PRIORITY.get(category, 0))
+
+	var template_path := "%s/%s.gd" % [TEMPLATES_ROOT, category.to_lower()]
+	if ResourceLoader.exists(template_path):
+		root.set_script(load(template_path))
+
+	# Assign owner so all children survive PackedScene.pack().
+	_assign_owner_recursive(root, root)
+
+	var packed := PackedScene.new()
+	var pack_err := packed.pack(root)
+	if pack_err != OK:
+		root.queue_free()
+		return "Failed to pack scene (error %d)" % pack_err
+	var tscn_path := "%s/%s.tscn" % [dir, asset_name]
+	var save_err := ResourceSaver.save(packed, tscn_path)
+	root.queue_free()
+	if save_err != OK:
+		return "Failed to write %s (error %d)" % [tscn_path, save_err]
+	return ""
+
+
+func _build_category_root(
+	category: String, pretty_name: String, ct: CanvasTexture, _image_size: Vector2,
+	collision_polys: Array, recognition_polys: Array
+) -> Node:
+	match category:
+		"Wall", "Door", "Lock":
+			var sb := StaticBody2D.new()
+			sb.name = pretty_name
+			_add_centered_sprite(sb, ct)
+			_add_named_polygons(sb, collision_polys, "Collision")
+			if recognition_polys.size() > 0:
+				_add_recognition_area(sb, recognition_polys)
+			return sb
+		"Camera":
+			# Root Area2D IS the recognition area; yellow polys go on root.
+			var area := Area2D.new()
+			area.name = pretty_name
+			area.collision_layer = 2
+			area.collision_mask = 0
+			_add_centered_sprite(area, ct)
+			_add_named_polygons(area, recognition_polys, "Recognition")
+			if collision_polys.size() > 0:
+				var body := StaticBody2D.new()
+				body.name = "Body"
+				area.add_child(body)
+				_add_named_polygons(body, collision_polys, "Collision")
+			return area
+		"Enemy":
+			var root := Node2D.new()
+			root.name = pretty_name
+			_add_centered_sprite(root, ct)
+			var body := CharacterBody2D.new()
+			body.name = "Body"
+			root.add_child(body)
+			_add_named_polygons(body, collision_polys, "Collision")
+			if recognition_polys.size() > 0:
+				_add_recognition_area(root, recognition_polys)
+			return root
+		"Artifact":
+			var root := Node2D.new()
+			root.name = pretty_name
+			_add_centered_sprite(root, ct)
+			if recognition_polys.size() > 0:
+				_add_recognition_area(root, recognition_polys)
+			return root
+		_:
+			return null
+
+
+func _add_centered_sprite(parent: Node, ct: CanvasTexture) -> void:
+	var spr := Sprite2D.new()
+	spr.name = "Sprite"
+	spr.centered = true
+	spr.texture = ct
+	parent.add_child(spr)
+
+
+func _add_named_polygons(parent: Node, polys: Array, name_prefix: String) -> void:
+	for i in range(polys.size()):
+		var cp := CollisionPolygon2D.new()
+		cp.name = "%s_%d" % [name_prefix, i]
+		cp.polygon = polys[i]
+		parent.add_child(cp)
+
+
+func _add_recognition_area(parent: Node, polys: Array) -> void:
+	var area := Area2D.new()
+	area.name = "Recognition"
+	area.collision_layer = 2
+	area.collision_mask = 0
+	parent.add_child(area)
+	_add_named_polygons(area, polys, "Recognition")
+
+
+func _assign_owner_recursive(node: Node, root: Node) -> void:
+	for child in node.get_children():
+		child.owner = root
+		_assign_owner_recursive(child, root)
+
+
+func _is_valid_name(s: String) -> bool:
+	if s == "":
+		return false
+	for ch in s:
+		var c := ch.unicode_at(0)
+		var is_lower := c >= "a".unicode_at(0) and c <= "z".unicode_at(0)
+		var is_digit := c >= "0".unicode_at(0) and c <= "9".unicode_at(0)
+		var is_underscore := ch == "_"
+		if not (is_lower or is_digit or is_underscore):
+			return false
+	return true
+
+
+func _sanitize_name(s: String) -> String:
+	var out := ""
+	for ch in s.to_lower():
+		var c := ch.unicode_at(0)
+		var is_lower := c >= "a".unicode_at(0) and c <= "z".unicode_at(0)
+		var is_digit := c >= "0".unicode_at(0) and c <= "9".unicode_at(0)
+		if is_lower or is_digit or ch == "_":
+			out += ch
+		elif ch == " " or ch == "-":
+			out += "_"
+	return out
+
+
+func _set_status_message(msg: String, is_error: bool) -> void:
+	if _status_tool:
+		_status_tool.text = msg
+		_status_tool.add_theme_color_override("font_color",
+			Color(1, 0.5, 0.5) if is_error else Color(0.5, 1, 0.6))
+
+
+# ── Load Asset ──────────────────────────────────────────────────────────────
+
+func _open_asset_browser() -> void:
+	_asset_browser_entries = _scan_palette()
+	_asset_browser_list.clear()
+	for entry in _asset_browser_entries:
+		_asset_browser_list.add_item("[%s]  %s" % [entry["category"], entry["name"]])
+	_asset_browser.popup_centered()
+
+
+func _scan_palette() -> Array:
+	var results: Array = []
+	var root := DirAccess.open(PALETTE_ROOT)
+	if root == null:
+		return results
+	for category in root.get_directories():
+		var cat_dir := "%s/%s" % [PALETTE_ROOT, category]
+		var cd := DirAccess.open(cat_dir)
+		if cd == null:
+			continue
+		for asset_name in cd.get_directories():
+			var json_path := "%s/%s/%s.borders.json" % [cat_dir, asset_name, asset_name]
+			if FileAccess.file_exists(json_path):
+				results.append({
+					"category": category,
+					"name": asset_name,
+					"json_path": json_path,
+				})
+	results.sort_custom(func(a, b): return [a["category"], a["name"]] < [b["category"], b["name"]])
+	return results
+
+
+func _on_asset_browser_item_activated(_idx: int) -> void:
+	_on_asset_browser_confirmed()
+
+
+func _on_asset_browser_confirmed() -> void:
+	var sel := _asset_browser_list.get_selected_items()
+	if sel.is_empty():
+		return
+	var entry: Dictionary = _asset_browser_entries[sel[0]]
+	_load_asset(entry["json_path"])
+
+
+func _load_asset(json_path: String) -> void:
+	var f := FileAccess.open(json_path, FileAccess.READ)
+	if f == null:
+		_set_status_message("Could not open %s" % json_path, true)
+		return
+	var text := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_set_status_message("Invalid borders.json", true)
+		return
+	var dir := json_path.get_base_dir()
+	var img_name: String = parsed.get("image", "")
+	if img_name == "":
+		_set_status_message("borders.json has no image field", true)
+		return
+	_load_png("%s/%s" % [dir, img_name])
+	# _load_png clears polygons; now restore from the JSON.
+	var loaded: Array = []
+	var raw_polys: Variant = parsed.get("polygons", [])
+	if typeof(raw_polys) == TYPE_ARRAY:
+		for p in raw_polys:
+			if typeof(p) != TYPE_DICTIONARY:
+				continue
+			var verts := PackedVector2Array()
+			var raw_verts: Variant = p.get("vertices", [])
+			if typeof(raw_verts) == TYPE_ARRAY:
+				for pair in raw_verts:
+					if typeof(pair) == TYPE_ARRAY and (pair as Array).size() >= 2:
+						verts.append(Vector2(float(pair[0]), float(pair[1])))
+			loaded.append({"type": p.get("type", "collision"), "vertices": verts})
+	_polygons = loaded
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_dirty = false
+	_set_status_message("Loaded: %s" % json_path.get_file(), false)

@@ -1,5 +1,18 @@
 extends Node2D
 
+const ShortcutPanelBuilder := preload("res://scripts/util/shortcut_panel.gd")
+
+# Always-visible shortcut help panel (rendered bottom-right while F5 is active).
+const SHORTCUTS := [
+	{"category": "Mode",  "key": "F5",          "desc": "Toggle Light Mode"},
+	{"category": "Light", "key": "LMB",         "desc": "Select light/overlay"},
+	{"category": "Light", "key": "LMB Drag",    "desc": "Move selected light"},
+	{"category": "Light", "key": "Delete",      "desc": "Delete selected"},
+	{"category": "View",  "key": "Mouse Wheel", "desc": "Zoom camera"},
+	{"category": "View",  "key": "Arrows",      "desc": "Pan camera"},
+	{"category": "View",  "key": "Middle Drag", "desc": "Pan camera"},
+]
+
 @export var helper_color: Color = Color(1, 0.95, 0.4, 0.75)
 @export var selection_color: Color = Color(0.4, 1, 0.7, 0.95)
 
@@ -27,6 +40,7 @@ var _rotation_value_label: Label = null
 var _energy_value_label: Label = null
 var _height_value_label: Label = null
 var _texture_scale_row: VBoxContainer = null
+var _help_panel: PanelContainer = null
 
 
 func _ready() -> void:
@@ -91,6 +105,8 @@ func _toggle() -> void:
 	set_process(active)
 	if _ui_panel:
 		_ui_panel.visible = active
+	if _help_panel:
+		_help_panel.visible = active
 	queue_redraw()
 
 
@@ -233,6 +249,22 @@ func _build_ui() -> void:
 	del_btn.text = "Delete Selected"
 	del_btn.pressed.connect(_delete_selected)
 	v.add_child(del_btn)
+
+	# Always-visible shortcut help, anchored bottom-right (the existing F5 panel
+	# sits top-right; bottom-right is clear).
+	_help_panel = ShortcutPanelBuilder.build("F5 Shortcuts", SHORTCUTS)
+	_help_panel.anchor_left = 1.0
+	_help_panel.anchor_right = 1.0
+	_help_panel.anchor_top = 1.0
+	_help_panel.anchor_bottom = 1.0
+	_help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_help_panel.offset_left = -8
+	_help_panel.offset_right = -8
+	_help_panel.offset_top = -8
+	_help_panel.offset_bottom = -8
+	_help_panel.visible = false
+	_ui_layer.add_child(_help_panel)
 
 
 func _add_property_slider(parent: Node, label_text: String, lo: float, hi: float, step: float, cb: Callable) -> HSlider:

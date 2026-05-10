@@ -1,5 +1,23 @@
 extends Node2D
 
+const ShortcutPanelBuilder := preload("res://scripts/util/shortcut_panel.gd")
+
+# Always-visible shortcut help panel (rendered bottom-right while F4 is active).
+const SHORTCUTS := [
+	{"category": "Mode",   "key": "F4",          "desc": "Toggle Edit Mode"},
+	{"category": "Mode",   "key": "Esc",         "desc": "Quit game"},
+	{"category": "Edit",   "key": "LMB Drag",    "desc": "Move object"},
+	{"category": "Edit",   "key": "Handle Drag", "desc": "Scale object"},
+	{"category": "Edit",   "key": "Shift+Click", "desc": "Multi-select toggle"},
+	{"category": "Edit",   "key": "C",           "desc": "Copy selected"},
+	{"category": "Edit",   "key": "M",           "desc": "Mirror selected"},
+	{"category": "Edit",   "key": "Delete",      "desc": "Delete selected"},
+	{"category": "Edit",   "key": "Ctrl+Z",      "desc": "Undo"},
+	{"category": "View",   "key": "Mouse Wheel", "desc": "Zoom camera"},
+	{"category": "View",   "key": "Arrows",      "desc": "Pan camera"},
+	{"category": "View",   "key": "Middle Drag", "desc": "Pan camera"},
+]
+
 @export var iso_angle_deg: float = 30.0
 @export var grid_size: int = 64
 @export var grid_label_step: int = 4
@@ -52,6 +70,7 @@ var _save_path_label: Label = null
 var _title_label: Label = null
 var _save_dialog: FileDialog = null
 var _exit_confirm: ConfirmationDialog = null
+var _help_panel: PanelContainer = null
 
 
 func _ready() -> void:
@@ -147,6 +166,22 @@ func _build_ui() -> void:
 
 	_update_save_path_label()
 	_update_dirty_indicator()
+
+	# Always-visible shortcut help, anchored bottom-right (the existing F4 panel
+	# sits top-left so this corner is clear).
+	_help_panel = ShortcutPanelBuilder.build("F4 Shortcuts", SHORTCUTS)
+	_help_panel.anchor_left = 1.0
+	_help_panel.anchor_right = 1.0
+	_help_panel.anchor_top = 1.0
+	_help_panel.anchor_bottom = 1.0
+	_help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_help_panel.offset_left = -8
+	_help_panel.offset_right = -8
+	_help_panel.offset_top = -8
+	_help_panel.offset_bottom = -8
+	_help_panel.visible = false
+	_ui_layer.add_child(_help_panel)
 
 
 func _mirror_selected() -> void:
@@ -293,6 +328,8 @@ func _toggle() -> void:
 	set_process(true)
 	if _ui_panel:
 		_ui_panel.visible = true
+	if _help_panel:
+		_help_panel.visible = true
 	_refresh_object_list()
 	_update_dirty_indicator()
 	_update_save_path_label()
@@ -633,6 +670,8 @@ func _force_deactivate() -> void:
 	set_process(false)
 	if _ui_panel:
 		_ui_panel.visible = false
+	if _help_panel:
+		_help_panel.visible = false
 	queue_redraw()
 
 
