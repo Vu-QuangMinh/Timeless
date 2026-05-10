@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://scenes/level_1/level_1.gd" id="1_lvl1"]
 [ext_resource type="Texture2D" path="res://assets/level1/Floor.png" id="2_floor"]
@@ -6,6 +6,7 @@
 [ext_resource type="Texture2D" path="res://assets/level1/Wall_Y.png" id="4_wally"]
 [ext_resource type="Script" path="res://scripts/EditMode.gd" id="5_edit"]
 [ext_resource type="Script" path="res://scripts/light_mode.gd" id="6_light"]
+[ext_resource type="Script" path="res://scripts/asset_editor.gd" id="7_asset"]
 
 [node name="Level1" type="Node2D"]
 script = ExtResource("1_lvl1")
@@ -33,3 +34,6 @@ script = ExtResource("5_edit")
 
 [node name="LightMode" type="Node2D" parent="."]
 script = ExtResource("6_light")
+
+[node name="AssetEditor" type="Node" parent="."]
+script = ExtResource("7_asset")

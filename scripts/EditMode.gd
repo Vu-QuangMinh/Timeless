@@ -39,9 +39,19 @@ var _scale_starts: Dictionary = {}
 
 var undo_stack: Array = []
 
+# Dirty tracking. _clean_undo_size is the size of undo_stack at the last save
+# (or at F4 enter). Anything pushed beyond that is unsaved work.
+var _dirty: bool = false
+var _clean_undo_size: int = 0
+var _suppress_dirty: bool = false  # set during Discard so undo doesn't re-mark dirty
+
 var _ui_layer: CanvasLayer = null
 var _ui_panel: PanelContainer = null
 var _ui_list: VBoxContainer = null
+var _save_path_label: Label = null
+var _title_label: Label = null
+var _save_dialog: FileDialog = null
+var _exit_confirm: ConfirmationDialog = null
 
 
 func _ready() -> void:
@@ -73,10 +83,10 @@ func _build_ui() -> void:
 	v.add_theme_constant_override("separation", 4)
 	margin.add_child(v)
 
-	var title := Label.new()
-	title.text = "Objects (F4)"
-	title.add_theme_font_size_override("font_size", 12)
-	v.add_child(title)
+	_title_label = Label.new()
+	_title_label.text = "Objects (F4)"
+	_title_label.add_theme_font_size_override("font_size", 12)
+	v.add_child(_title_label)
 
 	var sep := HSeparator.new()
 	v.add_child(sep)
@@ -93,6 +103,50 @@ func _build_ui() -> void:
 	mirror_btn.tooltip_text = "Flip selected object horizontally (M)"
 	mirror_btn.pressed.connect(_mirror_selected)
 	v.add_child(mirror_btn)
+
+	v.add_child(HSeparator.new())
+
+	_save_path_label = Label.new()
+	_save_path_label.add_theme_font_size_override("font_size", 10)
+	_save_path_label.add_theme_color_override("font_color", Color(0.7, 0.85, 1.0))
+	_save_path_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(_save_path_label)
+
+	var save_row := HBoxContainer.new()
+	save_row.add_theme_constant_override("separation", 4)
+	v.add_child(save_row)
+	var save_btn := Button.new()
+	save_btn.text = "Save"
+	save_btn.tooltip_text = "Save to current path"
+	save_btn.add_theme_font_size_override("font_size", 11)
+	save_btn.pressed.connect(_on_save_pressed)
+	save_row.add_child(save_btn)
+	var save_as_btn := Button.new()
+	save_as_btn.text = "Save As..."
+	save_as_btn.tooltip_text = "Pick a new path and save"
+	save_as_btn.add_theme_font_size_override("font_size", 11)
+	save_as_btn.pressed.connect(_on_save_as_pressed)
+	save_row.add_child(save_as_btn)
+
+	_save_dialog = FileDialog.new()
+	_save_dialog.access = FileDialog.ACCESS_USERDATA
+	_save_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_save_dialog.filters = PackedStringArray(["*.json ; JSON edits"])
+	_save_dialog.size = Vector2i(600, 420)
+	_save_dialog.file_selected.connect(_on_save_path_chosen)
+	_ui_layer.add_child(_save_dialog)
+
+	_exit_confirm = ConfirmationDialog.new()
+	_exit_confirm.title = "Unsaved map changes"
+	_exit_confirm.dialog_text = "Discard unsaved map changes?"
+	_exit_confirm.ok_button_text = "Discard"
+	_exit_confirm.add_button("Save", true, "save_and_close")
+	_exit_confirm.confirmed.connect(_on_exit_discard)
+	_exit_confirm.custom_action.connect(_on_exit_custom_action)
+	_ui_layer.add_child(_exit_confirm)
+
+	_update_save_path_label()
+	_update_dirty_indicator()
 
 
 func _mirror_selected() -> void:
@@ -163,7 +217,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_toggle()
 			get_viewport().set_input_as_handled()
 			return
-		if event.keycode == KEY_F5:
+		if event.keycode == KEY_F5 or event.keycode == KEY_F6:
 			return
 
 	if not active:
@@ -215,20 +269,33 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _toggle() -> void:
-	active = not active
 	if active:
-		var lm := get_node_or_null("../LightMode")
-		if lm and lm.get("active"):
-			lm.call("_toggle")
-	if not active:
-		selected = null
-		multi_selected.clear()
-		mode = "idle"
-	set_process(active)
+		# Trying to deactivate. If dirty, intercept and prompt; otherwise close.
+		if _dirty:
+			_exit_confirm.popup_centered()
+			return
+		_force_deactivate()
+		return
+	# Activating: turn off siblings, snapshot clean state, show panel.
+	# Cross-mode activation skips the dirty prompt — switching modes silently
+	# discards sibling unsaved work. The prompt only fires when the user
+	# explicitly toggles a mode off (own-key press or Close button).
+	active = true
+	for sibling_name in ["LightMode", "AssetEditor"]:
+		var s := get_node_or_null("../%s" % sibling_name)
+		if s and s.get("active"):
+			if s.has_method("_force_deactivate"):
+				s.call("_force_deactivate")
+			else:
+				s.call("_toggle")
+	_clean_undo_size = undo_stack.size()
+	_dirty = false
+	set_process(true)
 	if _ui_panel:
-		_ui_panel.visible = active
-	if active:
-		_refresh_object_list()
+		_ui_panel.visible = true
+	_refresh_object_list()
+	_update_dirty_indicator()
+	_update_save_path_label()
 	queue_redraw()
 
 
@@ -461,9 +528,112 @@ func _copy_selected() -> void:
 
 
 func _persist() -> void:
+	# Edits are now batched: mark dirty, write only on explicit Save / Save As.
+	_mark_dirty()
+
+
+func _mark_dirty() -> void:
+	if _suppress_dirty:
+		return
+	if not _dirty:
+		_dirty = true
+		_update_dirty_indicator()
+
+
+func _update_dirty_indicator() -> void:
+	if _title_label:
+		_title_label.text = "Objects (F4)%s" % ("  *" if _dirty else "")
+
+
+func _update_save_path_label() -> void:
+	if _save_path_label == null:
+		return
 	var owner_node := get_owner()
-	if owner_node and owner_node.has_method("save_edits"):
-		owner_node.call_deferred("save_edits")
+	var path := ""
+	if owner_node and "current_edits_path" in owner_node:
+		path = str(owner_node.get("current_edits_path"))
+	_save_path_label.text = "Saving to: %s" % (path if path != "" else "(none)")
+
+
+func _on_save_pressed() -> void:
+	_save_to_current_path()
+
+
+func _save_to_current_path() -> bool:
+	var owner_node := get_owner()
+	if owner_node == null or not owner_node.has_method("save_edits"):
+		push_warning("EditMode: owner has no save_edits() — cannot persist")
+		return false
+	var err: String = owner_node.call("save_edits")
+	if err != "":
+		push_error("EditMode save failed: %s" % err)
+		return false
+	_clean_undo_size = undo_stack.size()
+	_dirty = false
+	_update_dirty_indicator()
+	_update_save_path_label()
+	return true
+
+
+func _on_save_as_pressed() -> void:
+	var owner_node := get_owner()
+	if owner_node and "current_edits_path" in owner_node:
+		var current := str(owner_node.get("current_edits_path"))
+		if current.begins_with("user://"):
+			_save_dialog.current_file = current.substr("user://".length())
+	_save_dialog.popup_centered()
+
+
+func _on_save_path_chosen(path: String) -> void:
+	var owner_node := get_owner()
+	if owner_node == null or not owner_node.has_method("save_edits_to"):
+		return
+	var err: String = owner_node.call("save_edits_to", path)
+	if err != "":
+		push_error("EditMode Save As failed: %s" % err)
+		return
+	_clean_undo_size = undo_stack.size()
+	_dirty = false
+	_update_dirty_indicator()
+	_update_save_path_label()
+
+
+func _discard_changes() -> void:
+	_suppress_dirty = true
+	while undo_stack.size() > _clean_undo_size:
+		_undo()
+	_suppress_dirty = false
+	_dirty = false
+	_update_dirty_indicator()
+	_refresh_object_list()
+	queue_redraw()
+
+
+func _on_exit_discard() -> void:
+	# ConfirmationDialog's "OK" button = Discard
+	_discard_changes()
+	_force_deactivate()
+
+
+func _on_exit_custom_action(action: StringName) -> void:
+	if action == &"save_and_close":
+		if _save_to_current_path():
+			_exit_confirm.hide()
+			_force_deactivate()
+
+
+func _force_deactivate() -> void:
+	# Bypass the dirty check that _toggle() would re-trigger.
+	if not active:
+		return
+	active = false
+	selected = null
+	multi_selected.clear()
+	mode = "idle"
+	set_process(false)
+	if _ui_panel:
+		_ui_panel.visible = false
+	queue_redraw()
 
 
 func _iso_basis() -> Vector2:

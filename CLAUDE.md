@@ -15,6 +15,8 @@ godot --path . scenes/main.tscn
 # Run headless tests (exit 0 = pass, 1 = fail)
 godot --headless -s tests/test_time_calculator.gd
 godot --headless -s tests/test_pathing.gd
+godot --headless -s tests/test_actions.gd
+godot --headless -s tests/test_commit.gd
 ```
 
 There is no separate build step — Godot uses its built-in project system.
@@ -22,49 +24,53 @@ There is no separate build step — Godot uses its built-in project system.
 ## Architecture
 
 **Autoloads (global singletons, registered in `project.godot`):**
-- `GameManager` — owns global timer (60s budget), phase enum (`PLANNING/PREDICT/COMMIT`), `TURN_DURATION = 10s`, `ANIMATION_SPEED_MULTIPLIER = 5×`; signals `global_timer_changed`, `mission_failed`, `mission_succeeded`; methods `start_mission(duration)`, `advance_timer()`, `set_phase(phase)`
-- `TurnManager` — drives phase transitions; emits `phase_changed`, `turn_started`; exposes `start_first_turn()`, `enter_predict()`, `commit_turn()`, `back_to_planning()`
-- `ActionQueue` — stores ordered action dicts `{character_id, type, cost, data}` per character; `push_action()`, `undo_last()`, `reset_character()`, `flush_committed_actions()`, `get_time_used()`, `get_time_remaining()`; emits `queue_changed(character_id, actions)`
-- `TimeCalculator` — pure static math with no game-state dependencies; all 9 action-time formulas live here
+- `IsoMath` — isometric projection helpers; `project(world: Vector2) → Vector2` and `unproject(screen: Vector2) → Vector2`; constant `PPM = 32.0` (pixels per meter)
+- `GameManager` — owns global timer, phase enum (`PLANNING/PREDICT/COMMIT`); constants `TURN_BUDGET_S = 10.0`, `TOTAL_TURNS = 4`, `ANIMATION_SPEED_MULTIPLIER = 5.0`; signal `mission_ended()`; methods `start_mission(duration)`, `advance_timer(seconds)` (clamps to 0, emits `mission_ended` at 0)
+- `TurnManager` — drives phase transitions; signals `phase_changed(phase)`, `turn_started(turn_index)`, `turn_ended(turn_index)`; methods `start_predict()`, `back_to_planning()`, `commit()`, `start_next_turn()`
+- `ActionQueue` — stores ordered action dicts `{start_time, cost, type, ...}` per character; `add_action(char_id, dict)`, `get_next_available_time(char_id)`, `undo_last(char_id)`, `reset(char_id)`, `erase_from_time(char_id, t)`, `clear_all()`
+- `TimeCalculator` — uses `class_name` (not a registered autoload); pure static math, all 9 action-time formulas; no scene or autoload dependencies
 
-**Turn phases:**
-1. **PLANNING** — player queues actions (visually replayed at 5× speed); backtick=undo, R=reset
-2. **PREDICT** — guard AI runs as Tweens (not a process loop); "Back" restores pre-predict state via `restore_from_predict()`
-3. **COMMIT** — actions locked; `advance_timer()` deducts 10s; returns to PLANNING for next turn
+**Turn phases (PREDICT not yet implemented):**
+1. **PLANNING** — player queues actions; backtick=undo last, R=reset selected character
+2. **PREDICT** — planned but not yet implemented; reserved for guard AI Tween simulation
+3. **COMMIT** — `commit_actions()` runs all character tweens in parallel; `advance_timer(TURN_BUDGET_S)` deducts 10s; returns to PLANNING
 
 **Data flow:**
 ```
 Input (main.gd)
   → Pathfinding + cost calculation (pathfinder.gd + TimeCalculator)
   → ActionQueue (stores planned action dicts per character)
-  → PlayerCharacter.queue_action() → full sequence visually replayed
-  → TurnManager (PLANNING → PREDICT → COMMIT phase transitions)
-  → GameManager (global timer, win/lose)
+  → PlayerCharacter.queue_action() stores action object + dict
+  → Commit: all 3 characters animate in parallel via Tweens
+  → TurnManager.start_next_turn() + GameManager.advance_timer()
 ```
 
 **Key subsystems:**
 
-- **Characters** — `Character` (base: STR/INT/AGI stats, `carried_kg`, `is_neutralized`) → `PlayerCharacter` (selection, `queue_action(action)`, `queue_actions(actions[])`, `take_down()`, `restore_from_predict()`, `on_new_turn()`; `logical_pos` tracks final queued position for pathfinding/range checks). Three concrete subclasses: Brawler (STR 3, AGI 1), Cat Burglar (AGI 3, INT 1), Hacker (INT 3, STR 1).
+- **Characters** — `Character` (`class_name`, extends RefCounted: STR/INT/AGI stats, `carried_kg`, `is_neutralized`, `effective_weight()`) → `PlayerCharacter` (Node2D: `setup(id, char)`, `queue_action(action)`, `undo_last_action()`, `reset_actions()`, `commit_actions(scene_root) → Tween`, `clear_queue_after_commit()`, `get_move_paths()`; `logical_pos` tracks final queued position). Three classes: Brawler (STR 3, INT 1, AGI 1), Cat Burglar (STR 1, INT 1, AGI 3), Hacker (STR 1, INT 3, AGI 1).
 
-- **Actions** — `ActionBase` (abstract; `character_id`, `action_type`, `cost`, `execute_visual()` / `undo_visual()` Tween hooks) → six concrete subclasses: `ActionMove` (path tween along `MovePath`), `ActionTakedown` (enemy_type, target_id), `ActionPickUp` (item_kg, item_value), `ActionHoldHostage` (hold_duration clamped 0–5s, target_id), `ActionHack` (target_type, target_pos), `ActionPickLock` (lock_level 1–3, lock_type: glass/digital/mechanical).
+- **Actions** — `ActionBase` (abstract RefCounted; `char_id`, `action_type`, `cost`, `on_complete: Callable`, `execute_visual(char, tween)`, `to_dict()`) → three implemented subclasses: `ActionMove` (path tween along `MovePath`), `ActionPickUp` (squash-stretch tween, item_kg/item_value), `ActionPickLock` (oscillating scale tween, lock_level/lock_type). `ActionTakedown`, `ActionHoldHostage`, `ActionHack` are designed but not yet implemented.
 
-- **Pathfinding** — `Pathfinder` (visibility graph + A\*, circular obstacles, 0.5m char radius = 16px) → `PathSmoother` (raw waypoints → line+arc segments, arc radius 16px) → `MovePath` (immutable; `position_at(t: 0..1)` arc-length interpolation, `time_cost(agi, eff_kg)` calls TimeCalculator).
+- **Pathfinding** — `Pathfinder` (`class_name`; visibility graph + A*, circular obstacles, 0.5m char radius; `setup(wall_segs, obstacles)`, `find_path(from, to) → Array[Vector2]`) → `PathSmoother` (raw waypoints → line+arc segments, `ARC_RADIUS = 0.5m`) → `MovePath` (`class_name`; immutable; `position_at(t: 0..1)` arc-length interpolation, `total_length()`).
 
-- **Guard simulation (PREDICT phase)** — `main.gd._run_predict()`: per guard, `_guard_fov_target()` finds closest non-downed player in 120° FOV at up to 20m; then either `_animate_guard_shoot()` (face → fire after 3s → call `take_down()`), `_animate_guard_move()` (move toward target, stop at taser range 0.5m), or `_animate_guard_patrol()` (face nearest wall → walk to boundary → turn by `patrol_turn_angle`). All animation via Tweens; `Guard.facing_angle` and position updated on completion.
+- **UI** — All UI is programmatically constructed. `HUD` (CanvasLayer): global timer top-right, phase label top-left, character panels bottom (class dot + name + time bar + progress bar); signals `commit_pressed()`. `ContextMenu` (right-click popup; `show_at(pos, items)`, `close()`, `is_open()`; signals `item_selected(index)`). `PathPreview` (world-space line+arc overlay; `set_paths(char_id, paths)`, `clear_all()`). Input in `main.gd`: left-click select, right-click cascade (other char → chest → floor), Tab cycle.
 
-- **UI** — All UI is programmatically constructed. `HUD` (CanvasLayer): global timer top-right, phase label top-left, character panel bottom (class dot + name + neon time bar), phase-driven button visibility. `ContextMenu` (right-click popup; items built by `_build_move/chest/guard/hack_items()`). `PathPreview` (world-space line+arc overlay). `TimelinePanel` (`scripts/ui/timeline_panel.gd`, in progress). Input in `main.gd`: left-click select, right-click menu, Tab cycle.
+- **Level** — `level_1.gd`: hardcoded wall segments (world meters), chest obstacle (`center`, `radius = 0.75m` when locked); methods `get_wall_segments()`, `get_chest_obstacle()`, `get_room_bounds() → Rect2`, `unlock_chest()`, `pickup_chest()`. Chest state: `chest_locked`, `chest_picked_up`.
+
+- **Editor tools** (not part of gameplay) — `EditMode.gd` (F4: drag/scale/copy/delete scene objects), `light_mode.gd` (F5: Light2D editor with sliders), `camera_zoom.gd` (scroll wheel zoom with cursor anchor).
 
 ## Design constraints
 
-- 1 world unit = 1 pixel; 32 px/m scale
-- Turn structure: 6 turns × 10s = 60s global budget; room is 40×40m (HALF = 640px half-width)
-- Guard spawn: 10m (320px) from chest center; 3 guards facing nearest door
-- `TimeCalculator` must remain a pure math module — no autoload or scene dependencies
+- 1 world unit = 1 pixel; 32 px/m scale (`IsoMath.PPM`)
+- Turn budget: `TURN_BUDGET_S = 10s`; game started with 60s (`start_mission(60.0)` in `main.gd`)
+- Character footprint: 0.5m radius; pathfinder inflates all obstacles by this amount
+- Animation speed: 5× real-time (10s turn animates in 2s real time)
+- `TimeCalculator` must remain a pure math module — no autoload, scene, or Node dependencies
 
 ## Current state
 
-Implemented: character classes, global timer (60s), action queuing (undo/reset), all 9 time formulas (tested), pathfinding + path smoothing, all 6 action types, HUD + character panel + phase buttons, right-click context menu, path preview, guard patrol/move/shoot Predict AI, takedown status on guards and players, character selection.
+Implemented: character classes (3), global timer, action queuing (undo/reset), all 9 time formulas (tested), pathfinding + path smoothing, ActionMove + ActionPickUp + ActionPickLock with visual tweens, HUD + character panels + Commit button, right-click context menu with move/chest actions, path preview, commit phase (parallel character animation), takedown status on players, character selection, isometric rendering with normal-mapped lighting (Hacker animated; others as colored circles), in-editor tools (EditMode, LightMode).
 
-Not yet implemented: collision geometry on walls, partial actions at turn boundary (spillover), neutralization detection during Predict (currently applied instantly during Planning), mission fail/success UI, guard struggle / hold-hostage resolution, `TimelinePanel` (in progress).
+Not yet implemented: PREDICT phase + guard AI, ActionTakedown / ActionHoldHostage / ActionHack, collision geometry on walls, partial actions at turn boundary (spillover), mission fail/success UI, guard struggle/hold-hostage resolution, TimelinePanel, guard nodes on the map.
 
 See [design.md](design.md) for the full game design specification.

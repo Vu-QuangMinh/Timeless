@@ -3,10 +3,27 @@ extends Camera2D
 const ZOOM_MIN := 0.3
 const ZOOM_MAX := 3.0
 const ZOOM_STEP := 0.1
+const PAN_SPEED_PX_PER_SEC := 600.0  # screen-space speed at zoom 1.0
 
 var _dragging: bool = false
 var _drag_origin: Vector2 = Vector2.ZERO
 var _drag_cam_start: Vector2 = Vector2.ZERO
+
+
+func _process(delta: float) -> void:
+	var dir := Vector2.ZERO
+	if Input.is_key_pressed(KEY_LEFT):
+		dir.x -= 1.0
+	if Input.is_key_pressed(KEY_RIGHT):
+		dir.x += 1.0
+	if Input.is_key_pressed(KEY_UP):
+		dir.y -= 1.0
+	if Input.is_key_pressed(KEY_DOWN):
+		dir.y += 1.0
+	if dir == Vector2.ZERO:
+		return
+	# Divide by zoom so on-screen pan speed stays consistent across zoom levels.
+	position += dir.normalized() * PAN_SPEED_PX_PER_SEC * delta / zoom.x
 
 
 func _unhandled_input(event: InputEvent) -> void:

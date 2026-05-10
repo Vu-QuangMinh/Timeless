@@ -46,7 +46,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_toggle()
 			get_viewport().set_input_as_handled()
 			return
-		if event.keycode == KEY_ESCAPE or event.keycode == KEY_F4:
+		if event.keycode == KEY_ESCAPE or event.keycode == KEY_F4 or event.keycode == KEY_F6:
 			return
 
 	if not active:
@@ -95,9 +95,15 @@ func _toggle() -> void:
 
 
 func _disable_other_modes() -> void:
-	var em := get_node_or_null("../EditMode")
-	if em and em.get("active"):
-		em.call("_toggle")
+	# Cross-mode activation skips any sibling dirty prompt; switching modes
+	# silently force-closes the sibling. (LightMode itself has no dirty state.)
+	for sibling_name in ["EditMode", "AssetEditor"]:
+		var s := get_node_or_null("../%s" % sibling_name)
+		if s and s.get("active"):
+			if s.has_method("_force_deactivate"):
+				s.call("_force_deactivate")
+			else:
+				s.call("_toggle")
 
 
 func _persist() -> void:

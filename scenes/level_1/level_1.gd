@@ -5,6 +5,131 @@ extends Node2D
 var chest_locked: bool = true
 var chest_picked_up: bool = false
 
+# F4 EditMode persistence — JSON save of `editable`-group sprite transforms.
+# Format matches the v2 spec in changelog.md (transforms + deleted baseline keys).
+const DEFAULT_EDITS_PATH := "user://level_1_edits.json"
+var current_edits_path: String = DEFAULT_EDITS_PATH
+var _baseline_keys: Array = []
+
+
+func _ready() -> void:
+	call_deferred("_init_editor_state")
+
+
+func _init_editor_state() -> void:
+	_capture_baseline()
+	await _apply_saved_edits(current_edits_path)
+
+
+func _capture_baseline() -> void:
+	_baseline_keys.clear()
+	for n in get_tree().get_nodes_in_group("editable"):
+		_baseline_keys.append(_node_key(n))
+
+
+func _node_key(node: Node) -> String:
+	var parent := node.get_parent()
+	var parent_path := str(get_path_to(parent)) if parent else ""
+	return "%s|%s" % [parent_path, str(node.name)]
+
+
+func _apply_saved_edits(path: String) -> void:
+	if not FileAccess.file_exists(path):
+		return
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return
+	var text := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+	var transforms: Variant = parsed.get("transforms", parsed.get("objects", []))
+	if typeof(transforms) != TYPE_ARRAY:
+		return
+	var deleted: Variant = parsed.get("deleted", [])
+	if typeof(deleted) != TYPE_ARRAY:
+		deleted = []
+
+	var by_key := {}
+	for e in transforms:
+		if typeof(e) == TYPE_DICTIONARY:
+			var key := "%s|%s" % [str(e.get("parent", "")), str(e.get("name", ""))]
+			by_key[key] = e
+
+	# Only restore transforms to nodes that already exist in the scene; never
+	# instantiate "missing" entries (those are stale from a different scene
+	# version and would spawn phantom sprites). Same for `deleted`: only drop
+	# if it was in the captured baseline.
+	for n in get_tree().get_nodes_in_group("editable"):
+		var key := _node_key(n)
+		if by_key.has(key):
+			_apply_transform_to_node(n, by_key[key])
+
+	for n in get_tree().get_nodes_in_group("editable"):
+		var key2 := _node_key(n)
+		if key2 in deleted and key2 in _baseline_keys:
+			n.queue_free()
+
+	await get_tree().process_frame
+
+
+func _apply_transform_to_node(node: Node, e: Dictionary) -> void:
+	if not (node is Sprite2D):
+		return
+	var spr := node as Sprite2D
+	var pos: Array = e.get("position", [spr.position.x, spr.position.y])
+	spr.position = Vector2(float(pos[0]), float(pos[1]))
+	var sc: Array = e.get("scale", [spr.scale.x, spr.scale.y])
+	spr.scale = Vector2(float(sc[0]), float(sc[1]))
+	spr.z_index = int(e.get("z_index", spr.z_index))
+
+
+# Writes `editable`-group sprite transforms to JSON. Returns "" on success or
+# an error string. EditMode calls this from its Save / Save As buttons.
+func save_edits_to(path: String) -> String:
+	var transforms := []
+	var current_keys := {}
+	for n in get_tree().get_nodes_in_group("editable"):
+		if n is Sprite2D:
+			var spr := n as Sprite2D
+			var parent_path := str(get_path_to(spr.get_parent()))
+			var tex := ""
+			if spr.texture and spr.texture.resource_path:
+				tex = spr.texture.resource_path
+			transforms.append({
+				"name": str(spr.name),
+				"parent": parent_path,
+				"type": "Sprite2D",
+				"texture": tex,
+				"position": [spr.position.x, spr.position.y],
+				"scale": [spr.scale.x, spr.scale.y],
+				"centered": spr.centered,
+				"z_index": spr.z_index,
+			})
+			current_keys[_node_key(spr)] = true
+
+	var deleted_keys := []
+	for bk in _baseline_keys:
+		if not current_keys.has(bk):
+			deleted_keys.append(bk)
+
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return "Could not open %s for writing (error %d)" % [path, FileAccess.get_open_error()]
+	f.store_string(JSON.stringify({
+		"version": 2,
+		"transforms": transforms,
+		"deleted": deleted_keys,
+	}, "\t"))
+	f.close()
+	current_edits_path = path
+	return ""
+
+
+func save_edits() -> String:
+	return save_edits_to(current_edits_path)
+
 # ── Wall pixel constants (texture space) ──────────────────────────────────────
 # Extracted by scripts/tools/analyze_walls.py from Wall_X.png and Wall_Y.png
 # alpha edges. Texture size 2412×1760, sprite scale 0.5307, position (0,0).
