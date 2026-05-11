@@ -1,6 +1,12 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="Script" path="res://scripts/player_character.gd" id="1_pc"]
+[ext_resource type="SpriteFrames" path="res://scenes/characters/brawler_frames.tres" id="2_brawler_frames"]
 
 [node name="PlayerCharacter" type="Node2D"]
 script = ExtResource("1_pc")
+
+[node name="Sprite" type="AnimatedSprite2D" parent="."]
+position = Vector2(0, -140)
+sprite_frames = ExtResource("2_brawler_frames")
+animation = &"Idle_SE"

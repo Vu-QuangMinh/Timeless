@@ -18,6 +18,17 @@ var is_taken_down: bool = false
 
 var _action_objects: Array = []  # Array[ActionBase]
 
+const _BRAWLER_FRAMES     := preload("res://scenes/characters/brawler_frames.tres")
+const _CAT_BURGLAR_FRAMES := preload("res://scenes/characters/cat_burglar_frames.tres")
+const _HACKER_FRAMES      := preload("res://scenes/characters/hacker_frames.tres")
+const _GUARD_FRAMES       := preload("res://scenes/characters/guard_frames.tres")
+
+@onready var _sprite: AnimatedSprite2D = $Sprite
+
+
+func _ready() -> void:
+	_update_sprite()
+
 
 func setup(id: int, char: Object) -> void:
 	char_id = id
@@ -99,12 +110,48 @@ func get_move_paths() -> Array:
 	return paths
 
 
+func _update_sprite() -> void:
+	if _sprite == null or char_data == null:
+		if _sprite != null:
+			_sprite.visible = false
+		return
+	match char_data.char_class:
+		Character.CharacterClass.BRAWLER:
+			_sprite.sprite_frames = _BRAWLER_FRAMES
+			_sprite.scale = Vector2.ONE
+			_sprite.flip_h = false
+			_sprite.visible = true
+			_sprite.play("Idle_SE")
+		Character.CharacterClass.CAT_BURGLAR:
+			_sprite.sprite_frames = _CAT_BURGLAR_FRAMES
+			_sprite.scale = Vector2.ONE
+			_sprite.flip_h = false
+			_sprite.visible = true
+			_sprite.play("Idle_SW")
+		Character.CharacterClass.HACKER:
+			_sprite.sprite_frames = _HACKER_FRAMES
+			_sprite.scale = Vector2(0.2, 0.2)
+			_sprite.flip_h = false
+			_sprite.visible = true
+			_sprite.play("Idle_SE")
+		Character.CharacterClass.GUARD:
+			_sprite.sprite_frames = _GUARD_FRAMES
+			_sprite.scale = Vector2.ONE
+			_sprite.flip_h = false
+			_sprite.visible = true
+			_sprite.play("Idle_SE")
+		_:
+			_sprite.visible = false
+
+
 func _draw() -> void:
 	if is_taken_down:
 		draw_circle(Vector2.ZERO, 10.0, Color(0.4, 0.4, 0.4, 0.7))
 		return
-	var col: Color = COLOR_BY_CLASS[int(char_data.char_class)] if char_data else Color.GRAY
-	draw_circle(Vector2.ZERO, 12.0, col)
+	var has_sprite: bool = char_data != null
+	if not has_sprite:
+		var col: Color = COLOR_BY_CLASS[int(char_data.char_class)] if char_data else Color.GRAY
+		draw_circle(Vector2.ZERO, 12.0, col)
 	if is_selected:
 		draw_arc(Vector2.ZERO, 17.0, 0.0, TAU, 32, Color.WHITE, 2.5)
 	var font := ThemeDB.fallback_font

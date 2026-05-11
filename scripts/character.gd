@@ -1,13 +1,14 @@
 class_name Character
 extends RefCounted
 
-enum CharacterClass { BRAWLER, CAT_BURGLAR, HACKER }
+enum CharacterClass { BRAWLER, CAT_BURGLAR, HACKER, GUARD }
 
 # Indexed by CharacterClass int value
 const CLASS_STATS: Array = [
 	{"str": 3, "int": 1, "agi": 1, "name": "Brawler"},       # BRAWLER
 	{"str": 1, "int": 1, "agi": 3, "name": "Cat Burglar"},   # CAT_BURGLAR
 	{"str": 1, "int": 3, "agi": 1, "name": "Hacker"},        # HACKER
+	{"str": 2, "int": 1, "agi": 2, "name": "Guard"},         # GUARD
 ]
 
 const BASE_WEIGHT_KG := 70.0

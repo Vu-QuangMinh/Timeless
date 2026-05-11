@@ -1,6 +1,7 @@
 extends Node2D
 
-const _Character := preload("res://scripts/character.gd")
+const _Character    := preload("res://scripts/character.gd")
+const _HUDEditor    := preload("res://scripts/ui/hud_editor.gd")
 
 signal _commit_done()
 
@@ -11,6 +12,7 @@ var _selected_idx: int = 0
 var _path_preview: PathPreview
 var _context_menu: ContextMenu
 var _hud: HUD
+var _hud_editor
 
 var _input_locked: bool = false
 
@@ -39,6 +41,11 @@ func _ready() -> void:
 		pc.set_logical_pos(Vector2(spawn_x[i], 3.0))
 		_characters.append(pc)
 
+	var guard := pc_scene.instantiate() as PlayerCharacter
+	guard.setup(99, _Character.new(_Character.CharacterClass.GUARD))
+	add_child(guard)
+	guard.set_logical_pos(Vector2(5.0, 0.0))
+
 	_context_menu = preload("res://scenes/ui/context_menu.tscn").instantiate()
 	add_child(_context_menu)
 	_context_menu.item_selected.connect(_on_action_selected)
@@ -47,6 +54,10 @@ func _ready() -> void:
 	add_child(_hud)
 	_hud.commit_pressed.connect(_on_commit_pressed)
 
+	_hud_editor = _HUDEditor.new()
+	_hud_editor.setup(_hud)
+	add_child(_hud_editor)
+
 	GameManager.start_mission(60.0)
 	GameManager.mission_ended.connect(_on_mission_ended)
 
@@ -54,6 +65,11 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F7:
+			_hud_editor.toggle()
+			return
+
 	if _input_locked:
 		return
 

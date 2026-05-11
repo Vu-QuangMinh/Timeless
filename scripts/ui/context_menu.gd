@@ -3,7 +3,9 @@ extends CanvasLayer
 
 signal item_selected(index: int)
 
-var _panel: PanelContainer
+const _BorderPanel := preload("res://scripts/ui/border_panel.gd")
+
+var _panel: MarginContainer
 var _vbox: VBoxContainer
 var _buttons: Array = []
 var _pending_count: int = 0
@@ -11,7 +13,7 @@ var _pending_count: int = 0
 
 func _ready() -> void:
 	layer = 20
-	_panel = PanelContainer.new()
+	_panel = _BorderPanel.new()
 	add_child(_panel)
 	_vbox = VBoxContainer.new()
 	_vbox.add_theme_constant_override("separation", 0)
@@ -29,6 +31,9 @@ func show_at(screen_pos: Vector2, items: Array) -> void:
 		btn.disabled = not item["enabled"]
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		btn.custom_minimum_size = Vector2(160.0, 28.0)
+		btn.flat = true
+		btn.add_theme_color_override("font_color", Color.WHITE)
+		btn.add_theme_color_override("font_disabled_color", Color(1.0, 1.0, 1.0, 0.35))
 		var idx := i
 		btn.pressed.connect(func() -> void: _on_btn(idx))
 		_vbox.add_child(btn)
