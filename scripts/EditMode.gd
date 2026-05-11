@@ -9,7 +9,8 @@ const SHORTCUTS := [
 	{"category": "Edit",   "key": "LMB Drag",    "desc": "Move object"},
 	{"category": "Edit",   "key": "Handle Drag", "desc": "Scale object"},
 	{"category": "Edit",   "key": "Shift+Click", "desc": "Multi-select toggle"},
-	{"category": "Edit",   "key": "C",           "desc": "Copy selected"},
+	{"category": "Edit",   "key": "Ctrl+C",      "desc": "Copy selection to clipboard"},
+	{"category": "Edit",   "key": "Ctrl+V",      "desc": "Paste clipboard"},
 	{"category": "Edit",   "key": "M",           "desc": "Mirror selected"},
 	{"category": "Edit",   "key": "Delete",      "desc": "Delete selected"},
 	{"category": "Edit",   "key": "Ctrl+Z",      "desc": "Undo"},
@@ -57,6 +58,13 @@ var _scale_starts: Dictionary = {}
 
 var undo_stack: Array = []
 
+# Ctrl+C / Ctrl+V clipboard. Ctrl+C snapshots references to the current
+# multi_selected and resets the per-clipboard paste offset; Ctrl+V duplicates
+# each clipboard item with a smart name (<basename>_<n+1>) and stair-stepped
+# position so repeated pastes don't pile up.
+var _clipboard: Array[Node2D] = []
+var _clipboard_paste_offset: Vector2 = Vector2.ZERO
+
 # Dirty tracking. _clean_undo_size is the size of undo_stack at the last save
 # (or at F4 enter). Anything pushed beyond that is unsaved work.
 var _dirty: bool = false
@@ -71,6 +79,22 @@ var _title_label: Label = null
 var _save_dialog: FileDialog = null
 var _exit_confirm: ConfirmationDialog = null
 var _help_panel: PanelContainer = null
+
+# Asset palette — lists everything F6 has saved under res://assets/palette/.
+# Phase 2 implements drag-to-spawn: mouse-down on an entry begins a drag with
+# a translucent ghost; mouse-up over the viewport spawns; over a panel cancels.
+const PALETTE_ROOT := "res://assets/palette"
+const PALETTE_CATEGORY_ORDER := ["Camera", "Enemy", "Wall", "Door", "Lock", "Artifact"]
+var _palette_panel: PanelContainer = null
+var _palette_list: VBoxContainer = null
+
+# Drag state. While `_palette_dragging` is true, F4's existing left-click /
+# motion handlers early-return so the palette owns the mouse. Drag start is
+# triggered by the entry Button's `button_down` signal; release / cancel is
+# polled in `_process` via `Input.is_mouse_button_pressed`.
+var _palette_dragging: bool = false
+var _drag_payload: Dictionary = {}  # {type, path, category, name, ghost_scale}
+var _drag_ghost: Sprite2D = null
 
 
 func _ready() -> void:
@@ -183,6 +207,421 @@ func _build_ui() -> void:
 	_help_panel.visible = false
 	_ui_layer.add_child(_help_panel)
 
+	_build_palette_panel()
+
+
+func _build_palette_panel() -> void:
+	# Right-edge dock, ~220px wide. Stops short of the bottom so the
+	# bottom-right help panel keeps its real estate.
+	_palette_panel = PanelContainer.new()
+	_palette_panel.anchor_left = 1.0
+	_palette_panel.anchor_right = 1.0
+	_palette_panel.anchor_top = 0.0
+	_palette_panel.anchor_bottom = 1.0
+	_palette_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_palette_panel.offset_left = -228
+	_palette_panel.offset_right = -8
+	_palette_panel.offset_top = 8
+	_palette_panel.offset_bottom = -300  # leaves room for the help panel
+	_palette_panel.visible = false
+	_ui_layer.add_child(_palette_panel)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 8)
+	margin.add_theme_constant_override("margin_right", 8)
+	margin.add_theme_constant_override("margin_top", 6)
+	margin.add_theme_constant_override("margin_bottom", 6)
+	_palette_panel.add_child(margin)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 4)
+	margin.add_child(v)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 6)
+	v.add_child(header)
+	var title := Label.new()
+	title.text = "Assets"
+	title.add_theme_font_size_override("font_size", 12)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(title)
+	var refresh_btn := Button.new()
+	refresh_btn.text = "Refresh"
+	refresh_btn.tooltip_text = "Rescan res://assets/palette/"
+	refresh_btn.add_theme_font_size_override("font_size", 10)
+	refresh_btn.pressed.connect(_refresh_palette)
+	header.add_child(refresh_btn)
+
+	v.add_child(HSeparator.new())
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	v.add_child(scroll)
+
+	_palette_list = VBoxContainer.new()
+	_palette_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_palette_list.add_theme_constant_override("separation", 2)
+	scroll.add_child(_palette_list)
+
+
+func _refresh_palette() -> void:
+	if _palette_list == null:
+		return
+	for c in _palette_list.get_children():
+		c.queue_free()
+
+	var entries := _scan_palette()
+	if entries.is_empty():
+		var empty := Label.new()
+		empty.text = "No assets in res://assets/palette/.\nPress F6 to author one."
+		empty.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		empty.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		empty.add_theme_font_size_override("font_size", 10)
+		empty.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
+		_palette_list.add_child(empty)
+		return
+
+	# Group by category, emit canonical order first then any unknown categories.
+	var by_cat := {}
+	for e in entries:
+		var cat: String = e["category"]
+		if not by_cat.has(cat):
+			by_cat[cat] = []
+		(by_cat[cat] as Array).append(e)
+	var ordered_cats: Array = []
+	for c in PALETTE_CATEGORY_ORDER:
+		if by_cat.has(c):
+			ordered_cats.append(c)
+	for c in by_cat.keys():
+		if not ordered_cats.has(c):
+			ordered_cats.append(c)
+
+	for cat in ordered_cats:
+		var cat_label := Label.new()
+		cat_label.text = String(cat).to_upper()
+		cat_label.add_theme_font_size_override("font_size", 10)
+		cat_label.add_theme_color_override("font_color", Color(0.65, 0.85, 1.0))
+		_palette_list.add_child(cat_label)
+		for entry in by_cat[cat]:
+			_palette_list.add_child(_build_palette_entry(entry))
+
+
+# Returns Array of {category, name, type ("scene"|"sprite"), path}.
+func _scan_palette() -> Array:
+	var out: Array = []
+	if not DirAccess.dir_exists_absolute(PALETTE_ROOT):
+		return out
+	_scan_palette_dir(PALETTE_ROOT, out)
+	return out
+
+
+func _scan_palette_dir(dir_path: String, out: Array) -> void:
+	var d := DirAccess.open(dir_path)
+	if d == null:
+		return
+	# Collect .tscn basenames in this folder so we can skip the paired .tres
+	# (F6 saves both per asset; the .tres is referenced by the .tscn's Sprite2D).
+	var tscn_basenames := {}
+	for f in d.get_files():
+		if f.get_extension().to_lower() == "tscn":
+			tscn_basenames[f.get_basename()] = true
+
+	for f in d.get_files():
+		var ext := f.get_extension().to_lower()
+		var base := f.get_basename()
+		var path := "%s/%s" % [dir_path, f]
+		if ext == "tscn":
+			out.append({
+				"category": _palette_category_for(path),
+				"name": base,
+				"type": "scene",
+				"path": path,
+			})
+		elif ext == "tres" and not tscn_basenames.has(base):
+			# Only count standalone CanvasTextures.
+			var res = load(path)
+			if res is CanvasTexture:
+				out.append({
+					"category": _palette_category_for(path),
+					"name": base,
+					"type": "sprite",
+					"path": path,
+				})
+
+	for sub in d.get_directories():
+		_scan_palette_dir("%s/%s" % [dir_path, sub], out)
+
+
+# Category = first folder under PALETTE_ROOT.
+# e.g. res://assets/palette/Camera/foo/foo.tscn → "Camera"
+func _palette_category_for(asset_path: String) -> String:
+	var rel := asset_path.replace(PALETTE_ROOT + "/", "")
+	var parts := rel.split("/")
+	if parts.size() >= 1:
+		return parts[0]
+	return "(uncategorized)"
+
+
+func _build_palette_entry(e: Dictionary) -> Control:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+
+	var thumb := _build_palette_thumbnail(e)
+	row.add_child(thumb)
+
+	var btn := Button.new()
+	btn.text = String(e.get("name", ""))
+	btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	btn.clip_text = true
+	btn.add_theme_font_size_override("font_size", 11)
+	btn.tooltip_text = String(e.get("path", ""))
+	# Drag begins on mouse-down (not click), so the user can press, drag, drop.
+	btn.button_down.connect(_on_palette_entry_button_down.bind(e))
+	row.add_child(btn)
+	return row
+
+
+func _build_palette_thumbnail(e: Dictionary) -> Control:
+	var size := Vector2(48, 48)
+	var tex: Texture2D = null
+	var t: String = e.get("type", "")
+	if t == "scene":
+		tex = _palette_thumb_from_scene(String(e.get("path", "")))
+	elif t == "sprite":
+		var ct = load(String(e.get("path", "")))
+		if ct is CanvasTexture:
+			tex = (ct as CanvasTexture).diffuse_texture
+
+	if tex != null:
+		var rect := TextureRect.new()
+		rect.texture = tex
+		rect.custom_minimum_size = size
+		rect.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+		rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		return rect
+
+	var placeholder := ColorRect.new()
+	placeholder.color = Color(0.3, 0.3, 0.32)
+	placeholder.custom_minimum_size = size
+	return placeholder
+
+
+func _palette_thumb_from_scene(tscn_path: String) -> Texture2D:
+	var packed: PackedScene = load(tscn_path)
+	if packed == null:
+		return null
+	var inst: Node = packed.instantiate()
+	if inst == null:
+		return null
+	var tex := _find_first_sprite_texture(inst)
+	inst.queue_free()
+	return tex
+
+
+func _find_first_sprite_texture(node: Node) -> Texture2D:
+	if node is Sprite2D and (node as Sprite2D).texture != null:
+		return (node as Sprite2D).texture
+	for child in node.get_children():
+		var t := _find_first_sprite_texture(child)
+		if t != null:
+			return t
+	return null
+
+
+# Drag start — fires on mouse-down on a palette entry button.
+func _on_palette_entry_button_down(e: Dictionary) -> void:
+	if not active:
+		return
+	_start_palette_drag(e)
+
+
+func _start_palette_drag(e: Dictionary) -> void:
+	# Cancel any in-progress F4 drag/scale on the existing tools so we don't
+	# leave them in a half-state.
+	mode = "idle"
+	_drag_starts.clear()
+
+	var ghost_tex: Texture2D = null
+	var ghost_scale := Vector2.ONE
+	var t: String = e.get("type", "")
+	if t == "scene":
+		var info := _palette_scene_visual(String(e.get("path", "")))
+		ghost_tex = info.get("texture", null)
+		ghost_scale = info.get("scale", Vector2.ONE)
+	elif t == "sprite":
+		var ct = load(String(e.get("path", "")))
+		if ct is CanvasTexture:
+			ghost_tex = (ct as CanvasTexture).diffuse_texture
+
+	_drag_payload = {
+		"type": t,
+		"path": e.get("path", ""),
+		"category": e.get("category", ""),
+		"name": e.get("name", "asset"),
+		"ghost_scale": ghost_scale,
+	}
+	_palette_dragging = true
+	Input.set_default_cursor_shape(Input.CURSOR_DRAG)
+
+	if _drag_ghost == null:
+		_drag_ghost = Sprite2D.new()
+		_drag_ghost.centered = true
+		_drag_ghost.modulate = Color(1, 1, 1, 0.5)
+		_drag_ghost.z_index = 4097  # above EditMode's grid (z=4096)
+		add_child(_drag_ghost)
+	_drag_ghost.texture = ghost_tex
+	_drag_ghost.scale = ghost_scale
+	_drag_ghost.visible = ghost_tex != null
+	_update_drag_ghost_position()
+
+
+# Returns {texture: Texture2D, scale: Vector2} from a .tscn's first Sprite2D.
+func _palette_scene_visual(tscn_path: String) -> Dictionary:
+	var packed: PackedScene = load(tscn_path)
+	if packed == null:
+		return {"texture": null, "scale": Vector2.ONE}
+	var inst: Node = packed.instantiate()
+	if inst == null:
+		return {"texture": null, "scale": Vector2.ONE}
+	var spr := _find_first_sprite(inst)
+	var result: Dictionary
+	if spr:
+		result = {"texture": spr.texture, "scale": spr.scale}
+	else:
+		result = {"texture": null, "scale": Vector2.ONE}
+	inst.queue_free()
+	return result
+
+
+func _find_first_sprite(node: Node) -> Sprite2D:
+	if node is Sprite2D and (node as Sprite2D).texture != null:
+		return node as Sprite2D
+	for child in node.get_children():
+		var s := _find_first_sprite(child)
+		if s != null:
+			return s
+	return null
+
+
+func _update_drag_ghost_position() -> void:
+	if _drag_ghost == null:
+		return
+	# Spec: position at IsoMath.project(IsoMath.unproject(mouse)) — round-trip
+	# is identity for IsoMath but kept verbatim for clarity / future-proofing
+	# (in case unproject ever gains snapping).
+	var mouse_world := get_global_mouse_position()
+	var snapped := IsoMath.project(IsoMath.unproject(mouse_world))
+	# EditMode is a Node2D in world space; the ghost is its child, so position
+	# in world coords renders correctly under the camera.
+	_drag_ghost.global_position = snapped
+
+
+func _mouse_over_any_panel() -> bool:
+	var mp := get_viewport().get_mouse_position()
+	if not get_viewport().get_visible_rect().has_point(mp):
+		return true  # outside window counts as "not over viewport"
+	for p in [_ui_panel, _help_panel, _palette_panel]:
+		if p != null and p.visible and p.get_global_rect().has_point(mp):
+			return true
+	return false
+
+
+func _process_palette_drag() -> void:
+	# Hide ghost while cursor is over a panel; drag itself stays alive.
+	_drag_ghost.visible = not _mouse_over_any_panel() and _drag_ghost.texture != null
+	_update_drag_ghost_position()
+	# Release detection — Button's button_up signal isn't reliable for off-button
+	# release, so poll instead.
+	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_resolve_palette_drag()
+
+
+func _resolve_palette_drag() -> void:
+	if _mouse_over_any_panel():
+		_cancel_palette_drag()
+		return
+	var spawn_world := IsoMath.project(IsoMath.unproject(get_global_mouse_position()))
+	_spawn_palette_asset(spawn_world)
+	_finish_palette_drag()
+
+
+func _cancel_palette_drag() -> void:
+	_finish_palette_drag()
+
+
+func _finish_palette_drag() -> void:
+	_palette_dragging = false
+	_drag_payload = {}
+	if _drag_ghost != null:
+		_drag_ghost.visible = false
+	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+
+
+func _spawn_palette_asset(spawn_world_pos: Vector2) -> void:
+	var objects := _objects_node()
+	if objects == null:
+		push_warning("EditMode: spawn skipped — /Level1/Objects not found")
+		return
+	var t: String = _drag_payload.get("type", "")
+	var path: String = _drag_payload.get("path", "")
+	var basename: String = _drag_payload.get("name", "asset")
+	var unique := _unique_palette_name(objects, basename)
+
+	var node: Node = null
+	if t == "scene":
+		var packed: PackedScene = load(path)
+		if packed == null:
+			push_warning("EditMode: could not load scene %s" % path)
+			return
+		node = packed.instantiate()
+	elif t == "sprite":
+		var ct = load(path)
+		if not (ct is CanvasTexture):
+			push_warning("EditMode: %s is not a CanvasTexture" % path)
+			return
+		var spr := Sprite2D.new()
+		spr.centered = true
+		spr.texture = ct
+		node = spr
+	else:
+		return
+
+	if node == null:
+		return
+	node.name = unique
+	if node is Node2D:
+		(node as Node2D).position = spawn_world_pos
+	objects.add_child(node)
+	if not node.is_in_group("editable"):
+		node.add_to_group("editable")
+	# Tag with provenance so save_edits_to can route to spawned_scenes.
+	node.set_meta("palette_source", path)
+	node.set_meta("palette_type", t)
+
+	_push_undo({"action": "create", "node": node})
+	_persist()
+	_refresh_object_list()
+
+
+func _objects_node() -> Node:
+	var lvl := get_parent()
+	if lvl == null:
+		return null
+	return lvl.get_node_or_null("Objects")
+
+
+func _unique_palette_name(parent: Node, basename: String) -> String:
+	var i := 1
+	while i < 10000:
+		var candidate := "%s_%d" % [basename, i]
+		if not parent.has_node(candidate):
+			return candidate
+		i += 1
+	return "%s_%d" % [basename, Time.get_ticks_msec()]
+
 
 func _mirror_selected() -> void:
 	if multi_selected.size() == 0:
@@ -239,12 +678,19 @@ func _on_object_button_pressed(node: Node2D) -> void:
 
 
 func _process(_delta: float) -> void:
+	if _palette_dragging:
+		_process_palette_drag()
 	queue_redraw()
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
+			# Esc cancels a palette drag without quitting the game.
+			if _palette_dragging:
+				_cancel_palette_drag()
+				get_viewport().set_input_as_handled()
+				return
 			get_tree().quit()
 			get_viewport().set_input_as_handled()
 			return
@@ -258,14 +704,24 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not active:
 		return
 
+	# Right-click during a palette drag cancels (matches Esc).
+	if _palette_dragging and event is InputEventMouseButton \
+			and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_RIGHT \
+			and (event as InputEventMouseButton).pressed:
+		_cancel_palette_drag()
+		get_viewport().set_input_as_handled()
+		return
+
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
 			if event.keycode == KEY_Z and event.ctrl_pressed:
 				_undo()
+			elif event.keycode == KEY_C and event.ctrl_pressed:
+				_copy_to_clipboard()
+			elif event.keycode == KEY_V and event.ctrl_pressed:
+				_paste_clipboard()
 			elif event.keycode == KEY_DELETE and selected:
 				_delete_selected()
-			elif event.keycode == KEY_C and selected and not event.ctrl_pressed:
-				_copy_selected()
 			elif event.keycode == KEY_M and selected and not event.ctrl_pressed:
 				_mirror_selected()
 		get_viewport().set_input_as_handled()
@@ -273,6 +729,11 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP or event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			return
+		# Palette owns the mouse during drag — suppress F4's selection /
+		# scene-drag / scale-handle handlers without rewriting them.
+		if _palette_dragging:
+			get_viewport().set_input_as_handled()
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
@@ -293,6 +754,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 
 	if event is InputEventMouseMotion:
+		# Palette drag updates ghost via _process polling — don't let F4's
+		# drag/scale tools react to mouse motion while a drag is active.
+		if _palette_dragging:
+			get_viewport().set_input_as_handled()
+			return
 		if mode == "drag" and selected:
 			var delta := get_global_mouse_position() - _drag_mouse_start
 			for n in _drag_starts:
@@ -330,7 +796,10 @@ func _toggle() -> void:
 		_ui_panel.visible = true
 	if _help_panel:
 		_help_panel.visible = true
+	if _palette_panel:
+		_palette_panel.visible = true
 	_refresh_object_list()
+	_refresh_palette()
 	_update_dirty_indicator()
 	_update_save_path_label()
 	queue_redraw()
@@ -380,6 +849,20 @@ func _world_bounds(node: Node2D):
 		else:
 			origin = spr.global_position
 		origin += spr.offset * spr.global_scale
+		return Rect2(origin, size)
+	# Spawned scene roots (StaticBody2D, Area2D, Node2D, etc.) carry their visual
+	# in a child Sprite2D. Use that sprite's bounds — it inherits the root's
+	# transform via global_position/global_scale, so dragging/scaling the root
+	# moves the bounds correctly.
+	var child := _find_first_sprite(node)
+	if child and child.texture:
+		var size: Vector2 = child.texture.get_size() * child.global_scale.abs()
+		var origin: Vector2
+		if child.centered:
+			origin = child.global_position - size * 0.5
+		else:
+			origin = child.global_position
+		origin += child.offset * child.global_scale
 		return Rect2(origin, size)
 	return null
 
@@ -461,11 +944,23 @@ func _apply_scale_drag(mouse_world: Vector2) -> void:
 	factor = maxf(factor, 0.01)
 	var new_scale := scale_initial_node_scale * factor
 	selected.scale = new_scale
-	if selected is Sprite2D and (selected as Sprite2D).texture:
-		var spr := selected as Sprite2D
-		var sz: Vector2 = spr.texture.get_size() * Vector2(absf(new_scale.x), absf(new_scale.y))
-		if spr.centered:
-			selected.global_position = scale_anchor_world + scale_grabbed_dir * sz * 0.5
+	# Re-anchor: shift selected so the corner opposite the grabbed handle
+	# (scale_grabbed_dir tells us which corner was grabbed) stays fixed at
+	# scale_anchor_world. Works for Sprite2D roots and for spawned scene roots
+	# whose bounds come from a child Sprite2D.
+	var b = _world_bounds(selected)
+	if b != null:
+		var rect := b as Rect2
+		var anchor_corner: Vector2
+		if scale_grabbed_dir.x >= 0.0 and scale_grabbed_dir.y >= 0.0:
+			anchor_corner = rect.position
+		elif scale_grabbed_dir.x < 0.0 and scale_grabbed_dir.y >= 0.0:
+			anchor_corner = Vector2(rect.end.x, rect.position.y)
+		elif scale_grabbed_dir.x < 0.0 and scale_grabbed_dir.y < 0.0:
+			anchor_corner = rect.end
+		else:
+			anchor_corner = Vector2(rect.position.x, rect.end.y)
+		selected.global_position += scale_anchor_world - anchor_corner
 	for n in multi_selected:
 		if n != selected and is_instance_valid(n) and _scale_starts.has(n):
 			n.scale = (_scale_starts[n] as Vector2) * factor
@@ -543,25 +1038,60 @@ func _delete_selected() -> void:
 	_refresh_object_list()
 
 
-func _copy_selected() -> void:
-	if multi_selected.size() == 0:
-		return
-	var new_dups: Array[Node2D] = []
+func _copy_to_clipboard() -> void:
+	# Snapshot references; resets per-clipboard offset so the next paste lands
+	# exactly one copy_offset from the source.
+	_clipboard.clear()
 	for n in multi_selected:
 		if is_instance_valid(n):
-			var dup: Node = n.duplicate()
-			n.get_parent().add_child(dup)
-			if not dup.is_in_group("editable"):
-				dup.add_to_group("editable")
-			if dup is Node2D:
-				(dup as Node2D).global_position = n.global_position + copy_offset
-				new_dups.append(dup as Node2D)
-			_push_undo({"action": "create", "node": dup})
+			_clipboard.append(n)
+	_clipboard_paste_offset = Vector2.ZERO
+
+
+func _paste_clipboard() -> void:
+	if _clipboard.is_empty():
+		return
+	_clipboard_paste_offset += copy_offset
+	var new_dups: Array[Node2D] = []
+	for source in _clipboard:
+		if not is_instance_valid(source):
+			continue
+		var dup: Node = source.duplicate()
+		source.get_parent().add_child(dup)
+		if not dup.is_in_group("editable"):
+			dup.add_to_group("editable")
+		if dup is Node2D:
+			var d2 := dup as Node2D
+			d2.global_position = source.global_position + _clipboard_paste_offset
+			d2.name = _smart_copy_name(d2.get_parent(), str(source.name))
+			new_dups.append(d2)
+		_push_undo({"action": "create", "node": dup})
 	if new_dups.size() > 0:
 		multi_selected = new_dups
 		selected = new_dups[new_dups.size() - 1]
 	_persist()
 	_refresh_object_list()
+
+
+# If `source_name` ends in `_<digits>` (e.g. test_widget_3, Painting_1), the
+# new name keeps the same basename and finds the next unused index after that.
+# Otherwise (e.g. CCTV, Door), append `_1` (or higher if already taken).
+func _smart_copy_name(parent: Node, source_name: String) -> String:
+	var basename := source_name
+	var start := 1
+	var re := RegEx.new()
+	re.compile("^(.+)_(\\d+)$")
+	var m := re.search(source_name)
+	if m:
+		basename = m.get_string(1)
+		start = int(m.get_string(2)) + 1
+	var i := start
+	while i < 100000:
+		var candidate := "%s_%d" % [basename, i]
+		if not parent.has_node(candidate):
+			return candidate
+		i += 1
+	return "%s_%d" % [basename, Time.get_ticks_msec()]
 
 
 func _persist() -> void:
@@ -663,6 +1193,8 @@ func _force_deactivate() -> void:
 	# Bypass the dirty check that _toggle() would re-trigger.
 	if not active:
 		return
+	if _palette_dragging:
+		_cancel_palette_drag()
 	active = false
 	selected = null
 	multi_selected.clear()
@@ -672,6 +1204,8 @@ func _force_deactivate() -> void:
 		_ui_panel.visible = false
 	if _help_panel:
 		_help_panel.visible = false
+	if _palette_panel:
+		_palette_panel.visible = false
 	queue_redraw()
 
 

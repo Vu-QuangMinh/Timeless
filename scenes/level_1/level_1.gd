@@ -90,6 +90,60 @@ func _apply_saved_edits(path: String) -> void:
 
 	await get_tree().process_frame
 
+	# spawned_scenes (Phase 2 of palette feature). Backward compatible — the key
+	# is absent in older saves; treat as empty array.
+	var spawned: Variant = parsed.get("spawned_scenes", [])
+	if typeof(spawned) == TYPE_ARRAY:
+		_apply_spawned_scenes(spawned)
+
+
+func _apply_spawned_scenes(spawned: Array) -> void:
+	for entry in spawned:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var src: String = entry.get("palette_source", "")
+		var ptype: String = entry.get("palette_type", "scene")
+		var parent_path: String = entry.get("parent", "Objects")
+		var parent := get_node_or_null(parent_path)
+		if parent == null:
+			push_warning("level_1: spawned_scenes entry parent '%s' not found" % parent_path)
+			continue
+		if not ResourceLoader.exists(src):
+			push_warning("level_1: spawned_scenes asset '%s' missing on disk; skipping" % src)
+			continue
+		var node: Node = null
+		if ptype == "scene":
+			var packed: PackedScene = load(src)
+			if packed == null:
+				push_warning("level_1: failed to load %s" % src)
+				continue
+			node = packed.instantiate()
+		elif ptype == "sprite":
+			var ct = load(src)
+			if not (ct is CanvasTexture):
+				push_warning("level_1: %s is not a CanvasTexture" % src)
+				continue
+			var spr := Sprite2D.new()
+			spr.centered = true
+			spr.texture = ct
+			node = spr
+		if node == null:
+			continue
+		node.name = String(entry.get("name", "Spawned"))
+		if node is Node2D:
+			var n2 := node as Node2D
+			var pos: Array = entry.get("position", [0.0, 0.0])
+			n2.position = Vector2(float(pos[0]), float(pos[1]))
+			var sc: Array = entry.get("scale", [1.0, 1.0])
+			n2.scale = Vector2(float(sc[0]), float(sc[1]))
+			n2.rotation = float(entry.get("rotation", 0.0))
+			n2.z_index = int(entry.get("z_index", 0))
+		parent.add_child(node)
+		if not node.is_in_group("editable"):
+			node.add_to_group("editable")
+		node.set_meta("palette_source", src)
+		node.set_meta("palette_type", ptype)
+
 
 func _apply_transform_to_node(node: Node, e: Dictionary) -> void:
 	if not (node is Sprite2D):
@@ -104,12 +158,38 @@ func _apply_transform_to_node(node: Node, e: Dictionary) -> void:
 
 # Writes `editable`-group sprite transforms to JSON. Returns "" on success or
 # an error string. EditMode calls this from its Save / Save As buttons.
+#
+# Schema v2 also supports `spawned_scenes` for nodes spawned at runtime via the
+# F4 palette (Phase 2 of the palette feature). Such nodes carry a
+# `palette_source` metadata pointing at the source asset path; they're routed
+# to spawned_scenes regardless of node type. Untagged Sprite2Ds still go to
+# transforms (the .tscn baseline path).
 func save_edits_to(path: String) -> String:
 	var transforms := []
+	var spawned_scenes := []
 	var current_keys := {}
 	for n in get_tree().get_nodes_in_group("editable"):
-		if n is Sprite2D:
-			var spr := n as Sprite2D
+		var n2 := n as Node2D
+		if n2 == null:
+			continue
+		if n.has_meta("palette_source"):
+			# Palette-spawned: route to spawned_scenes with the source path so
+			# the loader knows which .tscn / .tres to re-instantiate.
+			spawned_scenes.append({
+				"name": str(n2.name),
+				"parent": str(get_path_to(n2.get_parent())),
+				"palette_source": str(n2.get_meta("palette_source")),
+				"palette_type": str(n2.get_meta("palette_type", "scene")),
+				"position": [n2.position.x, n2.position.y],
+				"scale": [n2.scale.x, n2.scale.y],
+				"rotation": n2.rotation,
+				"z_index": n2.z_index,
+			})
+			# Don't add to current_keys — palette spawns don't shadow baseline
+			# entries via the deleted[] mechanism.
+			continue
+		if n2 is Sprite2D:
+			var spr := n2 as Sprite2D
 			var parent_path := str(get_path_to(spr.get_parent()))
 			var tex := ""
 			if spr.texture and spr.texture.resource_path:
@@ -138,6 +218,7 @@ func save_edits_to(path: String) -> String:
 		"version": 2,
 		"transforms": transforms,
 		"deleted": deleted_keys,
+		"spawned_scenes": spawned_scenes,
 	}, "\t"))
 	f.close()
 	current_edits_path = path

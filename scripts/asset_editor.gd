@@ -1032,6 +1032,10 @@ func _scan_palette() -> Array:
 
 
 func _on_asset_browser_item_activated(_idx: int) -> void:
+	# ConfirmationDialog auto-hides on `confirmed` (the OK button); double-click
+	# fires `item_activated` instead, which doesn't auto-hide. Hide manually so
+	# the loaded polygons aren't obscured by the still-open browser.
+	_asset_browser.hide()
 	_on_asset_browser_confirmed()
 
 

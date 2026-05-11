@@ -225,8 +225,15 @@ func _approach_pos(target: Vector2, from: Vector2, dist: float) -> Vector2:
 	return target - d.normalized() * dist
 
 
+const WorldObstaclesScript := preload("res://scripts/pathing/world_obstacles.gd")
+
+
 func _build_path(from: Vector2, to: Vector2, pc: PlayerCharacter) -> MovePath:
+	# Baseline geometry hardcoded in the level + any spawned physics-layer
+	# obstacles (F4-spawned wall/door/lock assets contribute their
+	# CollisionPolygon2D edges).
 	var wall_segs: Array = _level.get_wall_segments()
+	wall_segs.append_array(WorldObstaclesScript.collect_wall_segments(_level))
 	var obstacles: Array = []
 	var chest_obs: Dictionary = _level.get_chest_obstacle()
 	if chest_obs["radius"] > 0.0:
