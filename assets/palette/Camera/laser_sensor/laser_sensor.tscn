@@ -2,18 +2,18 @@
 
 [ext_resource type="Texture2D" path="res://assets/palette/Camera/laser_sensor/laser_sensor.tres" id="1_ogrfw"]
 
-[node name="Laser_Sensor" type="Area2D" unique_id=361522891]
+[node name="Laser_Sensor" type="Area2D" unique_id=2067452199]
 collision_layer = 2
 collision_mask = 0
 metadata/recognition_priority = 40
 
-[node name="Sprite" type="Sprite2D" parent="." unique_id=484561926]
+[node name="Sprite" type="Sprite2D" parent="." unique_id=1041449308]
 texture = ExtResource("1_ogrfw")
 
-[node name="Recognition_0" type="CollisionPolygon2D" parent="." unique_id=190287147]
-polygon = PackedVector2Array(-46, -51.25, 51.75, -53.25, 55.25, 44.75, -45.75, 55)
+[node name="Recognition_0" type="CollisionPolygon2D" parent="." unique_id=518232256]
+polygon = PackedVector2Array(-46.5, -54.75, 61.5, -50.75, 55.75, 50.5, -52.5, 51.25)
 
-[node name="Body" type="StaticBody2D" parent="." unique_id=1418125100]
+[node name="Body" type="StaticBody2D" parent="." unique_id=28908976]
 
-[node name="Collision_0" type="CollisionPolygon2D" parent="Body" unique_id=1777457513]
-polygon = PackedVector2Array(-43.5, -42.75, -24.25, -55, 6.75, -56.75, 35, -54.75, 53, -40.5, 55, -4.75, 54, 32.25, 23, 49.75, -2.5, 57.75, -35.75, 48.25, -54.25, 35.75, -45.25, -42)
+[node name="Collision_0" type="CollisionPolygon2D" parent="Body" unique_id=946511094]
+polygon = PackedVector2Array(-45.5, -50.25, 53, -49.25, 51.75, 46.25, -46.5, 47.75, -46.5, -51)

@@ -1,3 +1,122 @@
+# Changelog — 2026-05-10 (later still, F4 asset palette + collision integration)
+
+**Editor:** Banana
+**Scope:** F4 asset palette (panel UI + drag-to-spawn + save round-trip), Ctrl+C/V clipboard refactor, F6 asset-browser UX fix, pathfinder reads spawned-wall geometry from the scene tree.
+
+## New files
+
+### Scripts
+- `scripts/pathing/world_obstacles.gd` — extracts pathfinder-format wall segments from any scene subtree. Walks for `CollisionPolygon2D` whose parent is a `CollisionObject2D` with `collision_layer` bit 0 set (StaticBody2D / CharacterBody2D — physics layer). Skips Area2Ds on layer 2 (recognition zones, not movement obstacles). Pulls each polygon vertex through the parent body's `global_transform`, then unprojects iso-pixel → world meters via inline iso math (autoload constants duplicated so the helper is unit-testable in isolation). Returns `Array of {a, b}` matching the existing `wall_segs` schema. No `class_name` — preloaded by callers to avoid the editor-scan-required global registration.
+
+### Tests
+- `tests/test_palette_scan.gd` — synthesizes a fake `res://assets/palette/` tree (one Camera scene-only entry, one Wall asset with both `.tscn` and `.tres`, one standalone Artifact `.tres`) and asserts the F4 palette scanner returns 3 entries with the right categories, and that the paired `.tres` is correctly deduped against its `.tscn` sibling. **5/5 pass.**
+- `tests/test_palette_spawn.gd` — Phase 2 round-trip: builds a synthetic palette `.tscn`, instantiates Level1 with a scratch save path, programmatically spawns the asset via EditMode → `_spawn_palette_asset`, asserts the node lands in `Objects/test_widget_1` at the right position with `palette_source` metadata, saves to disk, asserts the JSON has the new `spawned_scenes` array (and the spawn is NOT duplicated in `transforms`), tears down, re-instantiates Level1 with the same save, asserts the spawn re-appears at the saved position with metadata restored. Backward compat: a legacy save with no `spawned_scenes` key still loads. Adds regression checks for the bug-fix turn: `_world_bounds(spawned)` non-null, `_hit_test(spawned, center)` true, `Ctrl+C` → `Ctrl+V` smart naming (`test_widget_2`, `_3`, `_4`), stair-stepped paste offset, re-`Ctrl+C` resets the offset, `_smart_copy_name('Floor') == 'Floor_1'`. **20/20 pass.**
+- `tests/test_asset_load.gd` — F6 Ctrl+O round-trip: saves an asset with two polygons, wipes editor state, calls `_load_asset` on the saved `borders.json`, asserts `_polygons` is repopulated (count, types, vertex coords) AND `_preview.polygons` AND `_preview.image_size` are correct. **9/9 pass.**
+- `tests/test_spawned_collision.gd` — synthesizes a `StaticBody2D` + `CollisionPolygon2D` (4-vert box) at iso-pixel `(200, 0)`, asserts `WorldObstacles.collect_wall_segments(root)` returns 4 edges in world meters (not pixels), seeds a fresh Pathfinder with those segments, asserts `find_path` routes around the box (>2 waypoints), and confirms an Area2D with `collision_layer = 2` is skipped. **4/4 pass.**
+
+## Modified files
+
+### `scripts/EditMode.gd` — F4 asset palette + bug fixes
+
+**Phase 1 — palette panel UI:**
+- New constants: `PALETTE_ROOT = "res://assets/palette"`, `PALETTE_CATEGORY_ORDER = [Camera, Enemy, Wall, Door, Lock, Artifact]`.
+- New fields: `_palette_panel: PanelContainer`, `_palette_list: VBoxContainer`.
+- `_build_ui` now appends `_build_palette_panel()` after the help-panel block. Anchored right-edge full-height with `offset_bottom = -300` to leave room for the bottom-right help panel.
+- `_build_palette_panel()` builds: header (title "Assets" + Refresh button) → ScrollContainer → VBoxContainer rows.
+- `_refresh_palette()` clears + repopulates from `_scan_palette()`; renders empty-state Label if no entries; groups entries by category in `PALETTE_CATEGORY_ORDER` (unknown categories appended last); each category gets a small uppercase header in blue.
+- `_scan_palette()` recursively walks `PALETTE_ROOT`. Collects every `*.tscn` (scene asset) and standalone `*.tres` (sprite asset) — paired `.tres` files in the same folder as a `.tscn` of the same basename are deduped (F6 saves both per asset; the `.tres` is referenced by the `.tscn`'s Sprite2D).
+- `_palette_category_for(asset_path)` returns the first folder under `PALETTE_ROOT`.
+- `_build_palette_entry(entry)` returns an HBoxContainer: 48×48 thumbnail + name Button (truncating, expand-fill, tooltip = full path).
+- `_build_palette_thumbnail(entry)` extracts a Texture2D: scene assets → `_palette_thumb_from_scene` (instantiate, find first Sprite2D, grab texture, `queue_free`), sprite assets → `CanvasTexture.diffuse_texture`. Falls back to a 48×48 gray ColorRect placeholder.
+- `_find_first_sprite(node)` DFS helper (used both by thumbnail extraction and Phase 2 ghost rendering).
+- Visibility: `_toggle()` activate-branch sets `_palette_panel.visible = true` + calls `_refresh_palette()`; `_force_deactivate()` sets it false.
+
+**Phase 2 — drag-from-palette to spawn:**
+- New fields: `_palette_dragging: bool`, `_drag_payload: Dictionary` (type/path/category/name/ghost_scale), `_drag_ghost: Sprite2D`.
+- Palette entry buttons fire on `button_down` instead of `pressed` so drag begins on press, not on click-release.
+- `_on_palette_entry_button_down(e)` → `_start_palette_drag(e)`: cancels any in-progress F4 drag/scale, builds the ghost (Sprite2D in EditMode's world space, modulate alpha 0.5, `z_index = 4097`), sets cursor to `Input.CURSOR_DRAG`, populates `_drag_payload` and `_palette_dragging = true`.
+- For .tscn ghosts: `_palette_scene_visual(path)` instantiates and finds the first Sprite2D, returning its texture + scale. For .tres ghosts: `CanvasTexture.diffuse_texture`.
+- `_process_palette_drag()` (called from `_process` while dragging): hides the ghost while cursor is over a panel; updates ghost position to `IsoMath.project(IsoMath.unproject(get_global_mouse_position()))` (round-trip-identity per spec); polls `Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)` for release detection (Button's `button_up` signal isn't reliable for off-button release).
+- `_resolve_palette_drag()`: if cursor over panel/outside-window → cancel; else → `_spawn_palette_asset(snapped_world_pos)` and `_finish_palette_drag()`.
+- `_spawn_palette_asset(pos)`: scene → `load(path).instantiate()`; sprite → `Sprite2D.new()` with `centered = true` and `texture = CanvasTexture`. Parents under `/Level1/Objects` (via `_objects_node()`), assigns `_unique_palette_name(parent, basename)` (`<basename>_1`, `_2`, ...), adds to `editable` group, sets `set_meta("palette_source", path)` and `set_meta("palette_type", "scene"|"sprite")`, pushes `{action: "create"}` onto `undo_stack`, calls `_persist()` → `_mark_dirty()`.
+- `_mouse_over_any_panel()` tests viewport mouse against `_ui_panel` / `_help_panel` / `_palette_panel` rects, plus a viewport-bounds check (cursor outside the window also counts as "over panel" → cancel).
+- `_unhandled_input` gates the existing left-click and motion handlers with `if _palette_dragging: return`. New: Esc cancels drag without quitting; right-click during drag cancels.
+- `_force_deactivate()` cancels in-flight drag before tearing down.
+
+**Bug fixes:**
+- `_world_bounds(node)` extended: if `node` isn't a Sprite2D, finds the first Sprite2D child and computes bounds from its `global_position` / `global_scale` / texture size. Spawned scene roots (StaticBody2D for Wall/Door/Lock, Area2D for Camera, Node2D for Enemy/Artifact) all carry their visual in a child Sprite2D — that's now what selection / scale handles use. Hit-test, scale handles, and the selection rectangle all flow through the new bounds.
+- `_apply_scale_drag` rewritten to use a generic anchor-corner restore: after scaling, computes new bounds and shifts `selected.global_position` so the corner *opposite* the grabbed handle stays fixed at `scale_anchor_world`. Replaces the Sprite2D-only re-anchor branch; works for any node `_world_bounds` can compute.
+
+**Ctrl+C / Ctrl+V clipboard:**
+- New fields: `_clipboard: Array[Node2D]`, `_clipboard_paste_offset: Vector2`.
+- Bare `C` no longer copies. Ctrl+C → `_copy_to_clipboard()` snapshots references from `multi_selected` and resets the per-clipboard offset; Ctrl+V → `_paste_clipboard()` increments the offset by `copy_offset = (32, 32)`, then duplicates each clipboard item with the smart name and stair-stepped position. Repeated Ctrl+V creates a stair (paste 1 = source + 32, paste 2 = source + 64, ...). Re-Ctrl+C resets the offset. Stale clipboard refs (deleted source) are skipped silently via `is_instance_valid`.
+- `_smart_copy_name(parent, source_name)`: if source name ends in `_<digits>` (e.g. `test_widget_3`, `Painting_1`), keeps the basename and finds the next unused index after the source's number; otherwise (`CCTV`, `Door`) appends `_1`. Examples: copy of `test_widget_1` → `test_widget_2`; copy of `Painting_3` → `Painting_4`; copy of `CCTV` → `CCTV_1`.
+- Replaces the old `_copy_selected` (bare-C handler).
+- Old C-key handler removed; M (mirror) keybind unchanged.
+
+**SHORTCUTS const updated:**
+- Removed bare `C` entry; added `Ctrl+C → "Copy selection to clipboard"` and `Ctrl+V → "Paste clipboard"`. Help panel reflects the new bindings.
+
+### `scripts/asset_editor.gd`
+
+- F6 asset-browser auto-hide on double-click. ConfirmationDialog auto-hides on `confirmed` (the OK button); `item_activated` (double-click on an ItemList row) doesn't auto-hide. `_on_asset_browser_item_activated` now calls `_asset_browser.hide()` first so loaded polygons aren't obscured by the still-open browser. (Single-click + Load button worked before; double-click was the failure path the user reported as "load doesn't show polygons.")
+
+### `scripts/main.gd`
+
+- Preloads `WorldObstaclesScript` (no `class_name` to avoid Godot's editor-scan registration requirement).
+- `_build_path` now combines the level's hardcoded `get_wall_segments()` with `WorldObstacles.collect_wall_segments(_level)` before passing to `Pathfinder.setup`. Spawned wall/door/lock/camera-body assets contribute their `CollisionPolygon2D` edges; the player's path now routes around them. Pathfinder algorithm itself unchanged — same visibility-graph + A*, just with a richer `wall_segs` input.
+
+### `scenes/level_1/level_1.gd`
+
+- `save_edits_to(path)` — schema v2 gains `spawned_scenes` top-level array. Walks `editable` group; nodes with `palette_source` metadata route to `spawned_scenes` (with `palette_type`, position, scale, rotation, z_index) regardless of node type; untagged Sprite2Ds still go to `transforms` (the .tscn-baseline path).
+- `_apply_saved_edits(path)` — after the existing transforms pass, calls `_apply_spawned_scenes(spawned)`. Backward compat: missing `spawned_scenes` key = empty array.
+- `_apply_spawned_scenes(spawned)` — for each entry, validates `ResourceLoader.exists(palette_source)` (`push_warning` and skip if missing on disk), instantiates as scene or builds Sprite2D for sprite-type, parents under the path stored in the entry (default `Objects`), restores position/scale/rotation/z_index, sets `palette_source` and `palette_type` metadata, adds to `editable` group.
+
+## Save format addition — `user://level_1_edits.json` schema v2 (extended)
+
+`spawned_scenes` is now an additional top-level array alongside `transforms` and `deleted`. Per-entry shape:
+
+```
+{
+  "name": "test_widget_1",
+  "parent": "Objects",
+  "palette_source": "res://assets/palette/Test/test_widget/test_widget.tscn",
+  "palette_type": "scene",   // "scene" or "sprite"
+  "position": [x, y],
+  "scale":    [sx, sy],
+  "rotation": r,
+  "z_index":  z
+}
+```
+
+- `palette_source` points at the `.tscn` (for `palette_type: "scene"`) or `.tres` (for `palette_type: "sprite"`) under `res://assets/palette/`.
+- `transforms` and `deleted` are unchanged. Old saves missing the `spawned_scenes` key load cleanly (treated as empty array).
+- F4-spawned items carry `palette_source` and `palette_type` as Node metadata. `Node.duplicate()` preserves metadata, so `Ctrl+V` copies of palette spawns also round-trip through `spawned_scenes` — they're not silently downgraded to `transforms`.
+
+## Pathfinder collision integration
+
+The `Pathfinder` algorithm wasn't refactored. The integration is one-way: `WorldObstacles` extracts physics-layer geometry from the scene tree and appends to the existing `wall_segs` input. The pathfinder still uses pure-math segment intersection for LOS checks — no `PhysicsRayQueryParameters2D` calls. This was the smallest change that achieves the user-visible goal (spawned walls block movement) while keeping the existing pathfinder code and tests untouched. If a future phase wants the pathfinder to literally use Godot's physics for LOS, the data-extraction layer will still be useful (graph node generation needs to know where the walls are).
+
+The collision-layer convention matches what F6's `_save_asset` writes:
+- Wall/Door/Lock root: StaticBody2D with default `collision_layer = 1` → recognized as physics
+- Camera root: Area2D with `collision_layer = 2` (recognition only) — **skipped** by `WorldObstacles`. Its child `Body` StaticBody2D (default `collision_layer = 1`) IS extracted, so cameras can still block movement.
+- Enemy: child `Body` CharacterBody2D (default `collision_layer = 1`) extracted; root Node2D and Recognition Area2D skipped.
+- Artifact: root Node2D + Recognition Area2D — no physics body, nothing to extract (artifacts are pickup-only).
+
+Recognition Area2Ds (`collision_layer = 2`) are explicitly skipped by the `(co.collision_layer & COLLISION_LAYER_PHYSICS_BIT) != 0` check — they're for hover/interaction detection, not for blocking movement.
+
+## Notable decisions
+
+- **F4 palette panel cap-bottom instead of moving help panel.** Spec said "anchored right side, full-height" + "don't change... help panel". Made `_palette_panel.offset_bottom = -300` to leave room for the bottom-right help panel rather than relocating help elsewhere. Empty space at the bottom-right when help is shorter; palette scrolls if its content would exceed the available height. If you'd rather have help moved to bottom-left for F4 to free up the full right edge, easy follow-up.
+- **`button_down` instead of custom `gui_input`** for palette drag start. Avoided a custom Control subclass — Buttons handle hover visualization for free; drag start is just a different signal. The `pressed` (release-over-button) signal is not connected — drag-start-only semantics.
+- **Polling for drag motion / release in `_process`** instead of trying to listen via `_unhandled_input`. Buttons capture the mouse on press and release behavior across off-button drags is fiddly; polling is robust and runs only while `_palette_dragging` is true.
+- **Cross-mode activation still force-closes silently** during palette drag (consistent with the earlier 2026-05-10 entry's mutual-exclusion design).
+- **No `class_name` on `WorldObstacles`.** Godot's `class_name` global registration depends on the editor scan creating a `.uid` file. In pure headless test runs (no editor scan), the global identifier isn't visible, breaking parse. Preloading the script via `const Foo := preload("...")` works in both editor and headless contexts.
+- **Pathfinder unchanged.** The user's "refactor pathfinder to query physics layer" intent is satisfied at the data layer (pathfinder now sees physics-layer geometry from the scene) without refactoring its visibility-graph + A* algorithm. If future work wants true physics raycasts for LOS, that's a follow-up.
+- **F4 selection / drag / scale of spawned items.** The bug was `_world_bounds` only handling Sprite2D roots. Fix walks for the first Sprite2D child instead, and `_apply_scale_drag` uses a generic anchor-corner restore (works for any node `_world_bounds` can compute, not just Sprite2D roots).
+- **Smart copy naming.** If source name ends in `_<digits>`, increment from there; otherwise append `_1`. Picks the next *unused* number under the parent, so a copy of `test_widget_1` produces `test_widget_2`, then `test_widget_3`, even if the user manually deleted `test_widget_2` between pastes. Avoids Godot's auto-suffix `@N` ugliness.
+- **Stair-stepped paste offset.** Per-clipboard `_clipboard_paste_offset` accumulates `copy_offset` on each paste; Re-Ctrl+C resets. Three pastes in a row land at +1×, +2×, +3× offset instead of all overlapping at +1×.
+
 # Changelog — 2026-05-10 (later, restoration retro)
 
 **Editor:** Banana

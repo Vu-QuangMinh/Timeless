@@ -88,6 +88,16 @@ const PALETTE_CATEGORY_ORDER := ["Camera", "Enemy", "Wall", "Door", "Lock", "Art
 var _palette_panel: PanelContainer = null
 var _palette_list: VBoxContainer = null
 
+# Guard patrol routes. Keyed by enemy node name → {points: Array[Vector2] in
+# world meters, loop_mode: String}. Phase 1 only declares the data and surfaces
+# a selection-aware status label; Phases 2-6 add editing, rendering, simulation,
+# persistence, and shortcuts.
+const PATROL_RECOGNITION_PRIORITY := 50  # F6 writes this meta on Enemy roots
+const PATROL_LOOP_MODE_PING_PONG := "ping_pong"
+var _patrol_data: Dictionary = {}
+var _patrol_section: VBoxContainer = null
+var _patrol_status_label: Label = null
+
 # Drag state. While `_palette_dragging` is true, F4's existing left-click /
 # motion handlers early-return so the palette owns the mouse. Drag start is
 # triggered by the entry Button's `button_down` signal; release / cancel is
@@ -263,6 +273,29 @@ func _build_palette_panel() -> void:
 	_palette_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_palette_list.add_theme_constant_override("separation", 2)
 	scroll.add_child(_palette_list)
+
+	# Patrol section. Visible only when the user selects an enemy node
+	# (recognition_priority == 50). Phase 1 just shows the point count; Phases
+	# 2-6 add edit-mode toggles, line rendering, simulate button, etc.
+	v.add_child(HSeparator.new())
+	_patrol_section = VBoxContainer.new()
+	_patrol_section.add_theme_constant_override("separation", 2)
+	_patrol_section.visible = false
+	v.add_child(_patrol_section)
+	var patrol_title := Label.new()
+	patrol_title.text = "Patrol"
+	patrol_title.add_theme_font_size_override("font_size", 11)
+	patrol_title.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
+	_patrol_section.add_child(patrol_title)
+	_patrol_status_label = Label.new()
+	_patrol_status_label.text = "Patrols: 0 points"
+	_patrol_status_label.add_theme_font_size_override("font_size", 10)
+	_patrol_section.add_child(_patrol_status_label)
+	var patrol_hint := Label.new()
+	patrol_hint.text = "Press P to edit (Phase 2)"
+	patrol_hint.add_theme_font_size_override("font_size", 9)
+	patrol_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.75))
+	_patrol_section.add_child(patrol_hint)
 
 
 func _refresh_palette() -> void:
@@ -623,6 +656,44 @@ func _unique_palette_name(parent: Node, basename: String) -> String:
 	return "%s_%d" % [basename, Time.get_ticks_msec()]
 
 
+# ── Patrol routes (Phase 1) ────────────────────────────────────────────────
+
+# Returns the currently-selected node iff it's a guard (recognition_priority
+# meta == 50, written by F6's Enemy category builder). Otherwise null.
+func _selected_enemy() -> Node:
+	if selected == null or not is_instance_valid(selected):
+		return null
+	if int(selected.get_meta("recognition_priority", -1)) == PATROL_RECOGNITION_PRIORITY:
+		return selected
+	return null
+
+
+# Looks up (or returns a fresh default for) the patrol entry for a guard name.
+# Phase 2+ will mutate the returned dict directly when editing patrol points.
+func _patrol_entry_for(guard_name: String) -> Dictionary:
+	if not _patrol_data.has(guard_name):
+		_patrol_data[guard_name] = {
+			"points": [] as Array[Vector2],
+			"loop_mode": PATROL_LOOP_MODE_PING_PONG,
+		}
+	return _patrol_data[guard_name]
+
+
+# Shows/hides the patrol UI section based on whether an enemy is selected, and
+# refreshes the point-count label. Called from every selection-changing path.
+func _update_patrol_panel() -> void:
+	if _patrol_section == null:
+		return
+	var enemy := _selected_enemy()
+	if enemy == null:
+		_patrol_section.visible = false
+		return
+	var entry := _patrol_entry_for(str(enemy.name))
+	var pt_count := (entry.get("points", []) as Array).size()
+	_patrol_status_label.text = "Patrols: %d points" % pt_count
+	_patrol_section.visible = true
+
+
 func _mirror_selected() -> void:
 	if multi_selected.size() == 0:
 		return
@@ -655,6 +726,10 @@ func _refresh_object_list() -> void:
 		btn.add_theme_font_size_override("font_size", 11)
 		btn.pressed.connect(_on_object_button_pressed.bind(n))
 		_ui_list.add_child(btn)
+	# Selection-changing paths all flow through _refresh_object_list, so this
+	# is the single chokepoint that keeps the patrol panel in sync with
+	# `selected`. (See _selected_enemy / _update_patrol_panel.)
+	_update_patrol_panel()
 
 
 func _on_object_button_pressed(node: Node2D) -> void:

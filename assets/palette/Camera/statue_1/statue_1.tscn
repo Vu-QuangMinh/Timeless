@@ -1,0 +1,19 @@
+[gd_scene format=3]
+
+[ext_resource type="Texture2D" path="res://assets/palette/Camera/statue_1/statue_1.tres" id="1_mt4vt"]
+
+[node name="Statue_1" type="Area2D" unique_id=381335211]
+collision_layer = 2
+collision_mask = 0
+metadata/recognition_priority = 40
+
+[node name="Sprite" type="Sprite2D" parent="." unique_id=1733460677]
+texture = ExtResource("1_mt4vt")
+
+[node name="Recognition_0" type="CollisionPolygon2D" parent="." unique_id=1262761387]
+polygon = PackedVector2Array(-24.333334, -80.666664, -16, -90, 13.666668, -90.333336, 38, -54.666668, 40.666664, 69.33333, -1.3333321, 90.66667, -39.666668, 70, -37.333332, -24.333336)
+
+[node name="Body" type="StaticBody2D" parent="." unique_id=879347019]
+
+[node name="Collision_0" type="CollisionPolygon2D" parent="Body" unique_id=1856323240]
+polygon = PackedVector2Array(-25, -81.333336, -15.666666, -91.666664, 13.333332, -91.666664, 40, -54.666668, 39, 47.33333, 41.666664, 71.33333, 0.66666794, 92, -38, 72.66667, -38.333332, -21)

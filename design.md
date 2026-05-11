@@ -624,3 +624,150 @@ EditMode (F4) / LightMode (F5) still work.
 All test files pass.
 
 Stop and report. Don't proceed to M3b.
+Read CLAUDE.md, changelog.md, scripts/EditMode.gd, scripts/asset_editor.gd, scripts/pathfinder.gd, scripts/path_smoother.gd, scripts/move_path.gd, scenes/level_1/level_1.gd, scenes/level_1/level_1.tscn, and the user's save file at user://level_1_edits.json before writing anything. Confirm back: what F4's existing selection state looks like, how MovePath samples world-space points for rendering, and how the PathPreview (if present) projects them to screen via IsoMath.
+
+## What I'm building — Guard patrol routes in F4
+
+When the user selects an enemy node in F4 and presses P, they enter "patrol edit mode" for that enemy. They click around the level to drop patrol points; the points connect via real pathfinder routes (not straight lines). Patrols are ping-pong (A→B→C→B→A→B→C). A "Simulate Patrol" button toggles all guards moving along their routes in real time during F4. Pressing O toggles visibility of every guard's patrol line globally. Saves to user://level_1_edits.json with the same dirty-check + Ctrl+S behavior as everything else in F4.
+
+Build in 6 phases. Confirm each before starting the next.
+
+---
+
+## Phase 1 — Enemy identification + patrol data structure
+
+- F4 already detects selection. Add detection for "selected node is an enemy" by checking `selected_node.get_meta("recognition_priority", -1) == 50`. F6 already writes this meta on Enemy roots, so a fake_enemy spawned from the palette qualifies automatically. No new convention.
+- New data structure in EditMode.gd (or new file scripts/patrol_data.gd, whichever fits): a Dictionary keyed by guard node name → `{points: Array[Vector2] (world meters), loop_mode: "ping_pong"}`. World-meters convention matches Pathfinder.
+- Selection of a non-enemy node hides any patrol-related UI. Selection of an enemy shows: a "Patrols: <N> points" label in the existing right panel, and an indicator that P enters edit mode.
+- No editing yet. No rendering yet. Only: data structure, identification, and a small indicator.
+
+Show me Phase 1. The user will verify: select fake_enemy → see "Patrols: 0 points" appear. Select a wall → that disappears.
+
+---
+
+## Phase 2 — P toggles patrol edit mode; click to add, right-click to delete, drag to move
+
+When an enemy is selected and the user presses P:
+- F4 enters patrol-edit mode for that enemy. The cursor changes (or shows a tooltip "Patrol edit mode").
+- F4's normal left-click handlers (selection, drag-to-move object, scale handles, multi-select toggle) are SUPPRESSED while patrol-edit is active. Same gate-flag pattern as the asset-palette drag.
+- **Left-click on the floor** → add a patrol point at the clicked world position. Convert the click via `IsoMath.unproject(get_global_mouse_position())`. Append to the selected enemy's points array. Re-render markers.
+- **Right-click within ~0.3 m of an existing patrol point** (use world-meter distance, not screen pixels — same units as the points themselves) → delete that point. Renumber remaining points 1..N.
+- **Click-and-drag on an existing point** (mouse-down within ~0.3 m of a point, drag, release) → move it to the release position. Re-render.
+- Pressing P again exits patrol-edit mode. Pressing Esc also exits. Selection stays on the enemy.
+
+**Marker rendering** (only while THIS guard is selected, regardless of O state):
+- Each patrol point is a red filled circle (radius ~10 screen px) with the index "1", "2", "3", ... centered in white text
+- Circles drawn at `IsoMath.project(point_world_meters)`, so they sit on the iso ground plane
+
+For now, no path rendering between points — markers only. That's Phase 3.
+
+Mark F4 dirty whenever patrol data changes. Push undo entries onto F4's existing undo_stack so Ctrl+Z removes the last patrol edit:
+- Add point → undo removes it
+- Delete point → undo restores it at its original index
+- Move point → undo restores its position
+
+Show me Phase 2. The user will verify: select fake_enemy, press P, click 3 points, see numbered red circles. Right-click near point 2 to delete it. Drag point 3 to a new position. Ctrl+Z reverses each action.
+
+---
+
+## Phase 3 — Patrol lines via pathfinder
+
+When O is toggled ON, render every guard's patrol line. When O is OFF, render only the currently-selected guard's line (if patrol edit mode is active or the guard is selected).
+
+**Line computation** (do this once when patrol data changes, cache the result, invalidate on any patrol point edit or on level wall changes):
+- For each consecutive pair of patrol points (i, i+1), call Pathfinder.find_path(points[i], points[i+1]) → Array[Vector2] waypoints
+- Run PathSmoother on those waypoints to produce a MovePath (line+arc segments)
+- Sample the MovePath at 16 points per segment (or whatever PathPreview uses today — match its sample rate) to produce a polyline in world meters
+- Project each polyline vertex via IsoMath.project() to get screen-space points
+- If find_path returns empty (unreachable), the segment renders as a red DASHED straight line from points[i] to points[i+1] (projected). Dashed pattern: 8px on, 6px off.
+
+**Rendering**:
+- Reachable segments: solid line, 2px wide, color cyan `Color(0.3, 0.9, 1.0, 0.8)`
+- Unreachable segments: dashed line, 2px wide, color red `Color(1.0, 0.2, 0.2, 0.8)`
+- For PING-PONG mode: render the same lines forward (1→2→3) AND mirrored on the return (3→2→1 is already the same segments backward, so don't re-draw — just visually it implies bidirectional). But the LAST segment doesn't loop back to the first (ping-pong doesn't connect N→1), unlike a true loop. Make sure the renderer doesn't draw a wrap-around segment from points[N-1] to points[0].
+
+The O toggle is keybinding-driven, processed only when F4 is active. The state is stored on EditMode. Reset to OFF on F4 deactivate.
+
+Show me Phase 3. The user will verify: place 3 patrol points around obstacles, see cyan lines routing around them. Place a point inside a wall → red dashed line for that segment. Press O → other guards' lines appear too. Press O → lines for non-selected guards disappear.
+
+---
+
+## Phase 4 — Simulate Patrol button
+
+Add a "Simulate Patrol" button to F4's UI (in the right panel, somewhere visible). Toggle behavior:
+
+**OFF → ON**:
+- Record each guard's pre-simulate position (so we can restore on OFF)
+- For each guard with ≥ 2 patrol points: start the patrol animation
+- Animation logic: tween position along the same MovePath used for rendering (Phase 3). Speed: use the guard's effective_movespeed if available on the node, else default to 1.25 m/s (the guard speed per design.md).
+- Ping-pong: walk 1→2→3→...→N, then N→...→3→2→1, then repeat. Don't tween N→1 directly.
+- Use a single shared Tween created on the level root. TWEEN_PAUSE_PROCESS so it survives game pause if F4 happens to pause anything.
+- Animation speed: use GameManager.ANIMATION_SPEED_MULTIPLIER (currently 5×) to make simulation watchable.
+
+**ON → OFF**:
+- Stop all simulation tweens immediately
+- Restore each guard to its pre-simulate position
+
+While simulating: patrol-edit mode is force-exited if active. P key is ignored. Other F4 features (select another node, drag, etc.) remain available but tweens keep running. If a guard is deleted during simulate, its tween is killed cleanly.
+
+Simulation is F4-only. Leaving F4 (toggle F4 off, switch to F5/F6) auto-stops simulation and resets positions. Don't carry tween state across mode changes.
+
+Show me Phase 4. The user will verify: 3 guards with patrol routes, click Simulate, watch them all move along their paths in ping-pong. Click Simulate again, all reset to start positions.
+
+---
+
+## Phase 5 — Persistence in level_1_edits.json
+
+Extend the save schema with a `patrols` array at the top level:
+
+```json
+{
+  "version": 2,
+  "transforms": [...],
+  "spawned_scenes": [...],
+  "deleted": [...],
+  "patrols": [
+    {
+      "guard_name": "fake_enemy_1",
+      "points": [[x, y], [x, y], [x, y]],
+      "loop_mode": "ping_pong"
+    }
+  ]
+}
+```
+
+- On save: serialize patrol_data dictionary into the patrols array. Only guards with ≥ 1 point save an entry.
+- On load: after spawned_scenes are instantiated (so the guard nodes exist), iterate patrols and restore each guard's points by node name. If a referenced guard_name doesn't exist in the scene, `push_warning` and skip — don't crash, don't silently drop the data (keep it in patrol_data anyway in case the guard reappears, but log that this happened).
+- Backward compat: old save files without `patrols` key load as empty patrol data.
+- Dirty tracking: patrol edits mark F4 dirty. Ctrl+S saves. Discard-on-exit prompt covers patrols (same prompt logic as everything else in F4 — they get reverted by the existing undo cascade).
+
+Show me Phase 5. The user will verify: place patrol points, Ctrl+S, restart the game, re-enter F4, select the same guard → patrol points reappear in the same positions. Edit a point, see the dirty indicator. Exit F4 without saving → discard prompt → click Discard → reload F4, points are back to the last-saved state.
+
+---
+
+## Phase 6 — Help panel + changelog
+
+Update F4's SHORTCUTS constant to include:
+- {"category": "Patrol", "key": "P",          "desc": "Toggle patrol edit (enemy selected)"}
+- {"category": "Patrol", "key": "Left Click", "desc": "Add patrol point"}
+- {"category": "Patrol", "key": "Right Click","desc": "Delete patrol point (near a point)"}
+- {"category": "Patrol", "key": "Drag",       "desc": "Move patrol point"}
+- {"category": "Patrol", "key": "O",          "desc": "Toggle all patrol lines visible"}
+
+Add a dated entry to changelog.md describing every file touched, the new save schema, the simulation behavior, and the ping-pong convention.
+
+---
+
+## Constraints (all phases)
+
+- Pathfinder.gd, path_smoother.gd, and move_path.gd are NOT to be modified. Patrol-line rendering CONSUMES Pathfinder; it doesn't modify it.
+- Selection-detection uses recognition_priority meta (== 50 for Enemy). Do not introduce a separate "is_enemy" flag.
+- Save format change is backward compatible: old files without `patrols` load fine.
+- Simulation runs ONLY inside F4. Exiting F4 force-stops + resets. The main commit-phase animation system is untouched.
+- Don't break existing F4 features: drag/scale/copy/mirror/delete/undo/save/save-as/help panel/asset palette.
+- Don't break F5 or F6.
+- Coordinate convention: patrol points stored in world meters; rendered via IsoMath.project; clicked via IsoMath.unproject(get_global_mouse_position()).
+- DO NOT delete any nodes from level_1.tscn for any reason.
+- res:// is read-only in exported builds — this is debug/editor-only. Comment accordingly.
+- Use Godot 4.6 APIs.
+- Ask before making decisions you're unsure about. Don't invent requirements.

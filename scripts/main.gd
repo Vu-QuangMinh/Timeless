@@ -246,7 +246,7 @@ func _build_path(from: Vector2, to: Vector2, pc: PlayerCharacter) -> MovePath:
 	var smoother := PathSmoother.new()
 	return smoother.smooth(waypoints, wall_segs, obstacles)
 
-
+	
 func _build_move_items(items: Array, target: Vector2, pc: PlayerCharacter) -> void:
 	var start := _get_planned_end_pos(pc)
 	var path := _build_path(start, target, pc)

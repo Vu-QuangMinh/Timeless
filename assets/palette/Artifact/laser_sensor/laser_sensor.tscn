@@ -1,0 +1,21 @@
+[gd_scene format=3]
+
+[ext_resource type="Texture2D" path="res://assets/palette/Artifact/laser_sensor/laser_sensor.tres" id="1_ijwja"]
+
+[node name="Laser_Sensor" type="Node2D" unique_id=969565407]
+metadata/recognition_priority = 30
+
+[node name="Sprite" type="Sprite2D" parent="." unique_id=185062001]
+texture = ExtResource("1_ijwja")
+
+[node name="Body" type="StaticBody2D" parent="." unique_id=2116841031]
+
+[node name="Collision_0" type="CollisionPolygon2D" parent="Body" unique_id=890522733]
+polygon = PackedVector2Array(-25, -81.333336, -15.666666, -91.666664, 13.333332, -91.666664, 40, -54.666668, 39, 47.33333, 41.666664, 71.33333, 0.66666794, 92, -38, 72.66667, -38.333332, -21)
+
+[node name="Recognition" type="Area2D" parent="." unique_id=1859666297]
+collision_layer = 2
+collision_mask = 0
+
+[node name="Recognition_0" type="CollisionPolygon2D" parent="Recognition" unique_id=1621196895]
+polygon = PackedVector2Array(-24.333334, -80.666664, -16, -90, 13.666668, -90.333336, 38, -54.666668, 40.666664, 69.33333, -1.3333321, 90.66667, -39.666668, 70, -37.333332, -24.333336)

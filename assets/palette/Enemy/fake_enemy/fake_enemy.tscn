@@ -1,0 +1,21 @@
+[gd_scene format=3]
+
+[ext_resource type="Texture2D" path="res://assets/palette/Enemy/fake_enemy/fake_enemy.tres" id="1_4dmrw"]
+
+[node name="Fake_Enemy" type="Node2D" unique_id=1554039235]
+metadata/recognition_priority = 50
+
+[node name="Sprite" type="Sprite2D" parent="." unique_id=16068129]
+texture = ExtResource("1_4dmrw")
+
+[node name="Body" type="CharacterBody2D" parent="." unique_id=332032492]
+
+[node name="Collision_0" type="CollisionPolygon2D" parent="Body" unique_id=1547968181]
+polygon = PackedVector2Array(-20, -103, 20.333344, -81.666664, 27.666687, -67, 47, -1.6666565, 48.333344, 81.33334, 6.3333435, 101, -47.33333, 77.33334, -49.33333, 2.3333435)
+
+[node name="Recognition" type="Area2D" parent="." unique_id=2063189933]
+collision_layer = 2
+collision_mask = 0
+
+[node name="Recognition_0" type="CollisionPolygon2D" parent="Recognition" unique_id=1712670166]
+polygon = PackedVector2Array(-19.333313, -101.666664, 22.333344, -78, 46.333344, -2.3333282, 48, 83.33334, 8.666687, 99.33334, -46, 75.66669, -50, 3, -19, -103.666664)

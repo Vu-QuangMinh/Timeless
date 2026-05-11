@@ -597,6 +597,7 @@ func _on_png_chosen(path: String) -> void:
 		_load_discard_confirm.popup_centered()
 		return
 	_load_png(path)
+	_try_restore_sibling_borders(path)
 
 
 func _on_load_discard_confirmed() -> void:
@@ -607,6 +608,46 @@ func _on_load_discard_confirmed() -> void:
 	_polygons.clear()
 	_in_progress = PackedVector2Array()
 	_load_png(p)
+	_try_restore_sibling_borders(p)
+
+
+# If `png_path` has a sibling <basename>.borders.json (which is what F6 saves
+# alongside the PNG), restore the polygons from it. No-op for fresh PNGs.
+# Lets "Load PNG..." re-open a saved asset with its polygons intact, not just
+# the bare image. Returns true if polygons were restored.
+func _try_restore_sibling_borders(png_path: String) -> bool:
+	var borders_path := "%s/%s.borders.json" % [png_path.get_base_dir(), png_path.get_file().get_basename()]
+	if not FileAccess.file_exists(borders_path):
+		return false
+	var f := FileAccess.open(borders_path, FileAccess.READ)
+	if f == null:
+		return false
+	var text := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return false
+	var raw_polys: Variant = parsed.get("polygons", [])
+	if typeof(raw_polys) != TYPE_ARRAY:
+		return false
+	var loaded: Array = []
+	for p in raw_polys:
+		if typeof(p) != TYPE_DICTIONARY:
+			continue
+		var verts := PackedVector2Array()
+		var raw_verts: Variant = p.get("vertices", [])
+		if typeof(raw_verts) == TYPE_ARRAY:
+			for pair in raw_verts:
+				if typeof(pair) == TYPE_ARRAY and (pair as Array).size() >= 2:
+					verts.append(Vector2(float(pair[0]), float(pair[1])))
+		loaded.append({"type": p.get("type", "collision"), "vertices": verts})
+	if loaded.is_empty():
+		return false
+	_polygons = loaded
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_set_status_message("Loaded: %s + %d border%s" % [png_path.get_file(), loaded.size(), "" if loaded.size() == 1 else "s"], false)
+	return true
 
 
 func _load_png(path: String) -> void:
@@ -925,9 +966,18 @@ func _build_category_root(
 				_add_recognition_area(root, recognition_polys)
 			return root
 		"Artifact":
+			# Artifact was originally spec'd as pickup-only (no red), but if the
+			# user explicitly drew collision polys, honor them — same shape as
+			# Camera: a child `Body` StaticBody2D holds the red polys so spawned
+			# artifacts can block movement.
 			var root := Node2D.new()
 			root.name = pretty_name
 			_add_centered_sprite(root, ct)
+			if collision_polys.size() > 0:
+				var body := StaticBody2D.new()
+				body.name = "Body"
+				root.add_child(body)
+				_add_named_polygons(body, collision_polys, "Collision")
 			if recognition_polys.size() > 0:
 				_add_recognition_area(root, recognition_polys)
 			return root
