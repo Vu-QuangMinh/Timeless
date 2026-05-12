@@ -154,6 +154,12 @@ var _palette_dragging: bool = false
 var _drag_payload: Dictionary = {}  # {type, path, category, name, ghost_scale}
 var _drag_ghost: Sprite2D = null
 
+var _context_menu: PopupMenu = null
+var _context_menu_node: Node2D = null  # node targeted by the last RMB
+var _context_is_palette: bool = false
+var _palette_context_entry: Dictionary = {}
+var _palette_delete_confirm: ConfirmationDialog = null
+
 
 func _ready() -> void:
 	z_index = 4096
@@ -266,6 +272,22 @@ func _build_ui() -> void:
 	_ui_layer.add_child(_help_panel)
 
 	_build_palette_panel()
+	_build_context_menu()
+
+
+func _build_context_menu() -> void:
+	_context_menu = PopupMenu.new()
+	_context_menu.add_item("Clone", 0)
+	_context_menu.add_separator()
+	_context_menu.add_item("Delete", 1)
+	_context_menu.id_pressed.connect(_on_context_menu_id_pressed)
+	_ui_layer.add_child(_context_menu)
+
+	_palette_delete_confirm = ConfirmationDialog.new()
+	_palette_delete_confirm.title = "Delete Asset"
+	_palette_delete_confirm.ok_button_text = "Delete"
+	_palette_delete_confirm.confirmed.connect(_on_palette_delete_confirmed)
+	_ui_layer.add_child(_palette_delete_confirm)
 
 
 func _build_palette_panel() -> void:
@@ -470,6 +492,7 @@ func _build_palette_entry(e: Dictionary) -> Control:
 	btn.tooltip_text = String(e.get("path", ""))
 	# Drag begins on mouse-down (not click), so the user can press, drag, drop.
 	btn.button_down.connect(_on_palette_entry_button_down.bind(e))
+	btn.gui_input.connect(_on_palette_entry_btn_gui_input.bind(e))
 	row.add_child(btn)
 	return row
 
@@ -1213,6 +1236,7 @@ func _refresh_object_list() -> void:
 		btn.button_pressed = (n in multi_selected)
 		btn.add_theme_font_size_override("font_size", 11)
 		btn.pressed.connect(_on_object_button_pressed.bind(n))
+		btn.gui_input.connect(_on_object_list_btn_gui_input.bind(n))
 		_ui_list.add_child(btn)
 	# Selection-changing paths all flow through _refresh_object_list, so this
 	# is the single chokepoint that keeps the patrol panel in sync with
@@ -1242,6 +1266,139 @@ func _on_object_button_pressed(node: Node2D) -> void:
 	mode = "idle"
 	_refresh_object_list()
 	queue_redraw()
+
+
+func _on_object_list_btn_gui_input(event: InputEvent, node: Node2D) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var me := event as InputEventMouseButton
+	if me.button_index != MOUSE_BUTTON_RIGHT or not me.pressed:
+		return
+	if not is_instance_valid(node):
+		return
+	if node not in multi_selected:
+		multi_selected = [node]
+		selected = node
+		_refresh_object_list()
+	_context_is_palette = false
+	_context_menu_node = selected
+	var mp := Vector2i(get_viewport().get_mouse_position())
+	_context_menu.popup(Rect2i(mp, Vector2i.ZERO))
+
+
+func _on_palette_entry_btn_gui_input(event: InputEvent, e: Dictionary) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var me := event as InputEventMouseButton
+	if not me.pressed:
+		return
+	if me.button_index == MOUSE_BUTTON_LEFT and me.double_click:
+		_open_asset_in_f6(e)
+		return
+	if me.button_index == MOUSE_BUTTON_RIGHT:
+		_context_is_palette = true
+		_palette_context_entry = e
+		var mp := Vector2i(get_viewport().get_mouse_position())
+		_context_menu.popup(Rect2i(mp, Vector2i.ZERO))
+
+
+func _on_context_menu_id_pressed(id: int) -> void:
+	if _context_is_palette:
+		match id:
+			0:
+				_spawn_palette_entry_at_center(_palette_context_entry)
+			1:
+				_confirm_delete_palette_asset(_palette_context_entry)
+	else:
+		match id:
+			0:
+				_clone_selected()
+			1:
+				_delete_selected()
+
+
+func _clone_selected() -> void:
+	if multi_selected.is_empty():
+		return
+	var new_nodes: Array[Node2D] = []
+	for source in multi_selected:
+		if not is_instance_valid(source):
+			continue
+		var dup: Node = source.duplicate()
+		source.get_parent().add_child(dup)
+		if not dup.is_in_group("editable"):
+			dup.add_to_group("editable")
+		if dup is Node2D:
+			var d2 := dup as Node2D
+			d2.global_position = source.global_position + copy_offset
+			d2.name = _smart_copy_name(d2.get_parent(), str(source.name))
+			new_nodes.append(d2)
+		_push_undo({"action": "create", "node": dup})
+	if not new_nodes.is_empty():
+		multi_selected = new_nodes
+		selected = new_nodes[new_nodes.size() - 1]
+	_persist()
+	_refresh_object_list()
+
+
+func _open_asset_in_f6(e: Dictionary) -> void:
+	var path: String = String(e.get("path", ""))
+	if path == "":
+		return
+	var dir_path: String = path.get_base_dir()
+	var asset_name: String = path.get_basename().get_file()
+	var json_path: String = dir_path + "/" + asset_name + ".borders.json"
+	if not FileAccess.file_exists(json_path):
+		push_warning("EditMode: no borders.json found for %s" % asset_name)
+		return
+	var asset_editor := get_node_or_null("../AssetEditor")
+	if asset_editor == null:
+		push_warning("EditMode: AssetEditor node not found")
+		return
+	if not bool(asset_editor.get("active")):
+		asset_editor.call("_toggle")
+	asset_editor.call("_load_asset", json_path)
+
+
+func _spawn_palette_entry_at_center(e: Dictionary) -> void:
+	var cam := get_viewport().get_camera_2d()
+	var spawn_iso: Vector2
+	if cam:
+		spawn_iso = cam.get_screen_center_position()
+	else:
+		spawn_iso = get_viewport_rect().size * 0.5
+	_drag_payload = {
+		"type": String(e.get("type", "")),
+		"path": String(e.get("path", "")),
+		"category": String(e.get("category", "")),
+		"name": String(e.get("name", "asset")),
+		"ghost_scale": Vector2.ONE,
+	}
+	_spawn_palette_asset(IsoMath.project(IsoMath.unproject(spawn_iso)))
+	_drag_payload = {}
+
+
+func _confirm_delete_palette_asset(e: Dictionary) -> void:
+	if _palette_delete_confirm == null:
+		return
+	var name: String = String(e.get("name", "this asset"))
+	_palette_delete_confirm.dialog_text = "Delete \"%s\" and all its files from the palette?" % name
+	_palette_context_entry = e
+	_palette_delete_confirm.popup_centered()
+
+
+func _on_palette_delete_confirmed() -> void:
+	var path: String = String(_palette_context_entry.get("path", ""))
+	if path == "":
+		return
+	var dir_path: String = path.get_base_dir()
+	var d := DirAccess.open(dir_path)
+	if d == null:
+		return
+	for f in d.get_files():
+		DirAccess.remove_absolute(dir_path + "/" + f)
+	DirAccess.remove_absolute(dir_path)
+	_refresh_palette()
 
 
 func _process(_delta: float) -> void:
