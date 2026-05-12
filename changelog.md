@@ -1,4 +1,113 @@
-# Changelog — 2026-05-10 (later still, F4 asset palette + collision integration)
+# Changelog — 2026-05-12 (F4 patrol routes — Phases 2–6 + unreachable rejection)
+
+**Editor:** Banana
+**Scope:** Builds out the F4 guard-patrol feature on top of Phase 1 (commit `1da00d5`, which added the enemy-selection panel and the `_patrol_data` dict). Phases 2–6 land here: P-toggled edit mode with add/delete/drag, pathfinder-routed line previews with `O`-toggle visibility, "Simulate Patrol" ping-pong animation, save-format extension, and help-panel update. One spec extension on top: placement reachability is enforced at edit-time with an `AcceptDialog` popup instead of being a render-only fallback.
+
+## New files
+
+### Tests
+- `tests/test_patrol_phase2.gd` — 17 assertions covering P-toggle, add/delete/drag point with undo, status-label refresh, dirty marking, selection-change auto-exit, `_patrol_exit_edit_mode` direct call.
+- `tests/test_patrol_phase3.gd` — 12 assertions: per-guard polyline cache (2 segments for 3 points), all-reachable classification in obstacle-free levels, `IsoMath.project`-equivalent endpoint values, cache invalidation on add/drag/undo, `O` key toggle of `_show_all_patrols`, `_force_deactivate` resets flag + cache.
+- `tests/test_patrol_phase4.gd` — 15 assertions: `_simulating` state transitions, one `Tween` per ≥2-point guard, `<2`-point guards skipped, pre-position capture/restore, button label flip, guard moves during sim (verified by frame-stepped position comparison), `P` no-op during sim, F4-deactivate auto-stops.
+- `tests/test_patrol_phase5.gd` — 11 assertions, full Level1 round-trip: palette-spawn fake_enemy → add patrol → save → JSON shape (`patrols` array, `[[x,y]]` points, `loop_mode`), `0`-point guards filtered out, reload restores `_patrol_data`, palette-spawned guard re-instantiates via `spawned_scenes`. Plus backward-compat (no `patrols` key) and drift (patrol references missing guard) — drift case `push_warning`s and keeps the data in memory.
+- `tests/test_patrol_unreachable_rejection.gd` — 8 assertions: `_patrol_is_reachable` helper truthing, first-add bypass, second-add into a circular obstacle rejected (no append, no undo), drag-end into unreachable zone reverts to origin (no undo entry pushed). Geometry note: a closed wall-box doesn't actually create unreachable zones — pathfinder routes through the corners since `_segs_intersect` treats endpoint-touching as non-blocking. A circular obstacle centered on the target is what reliably forces `find_path → []`.
+
+## Modified files
+
+### `scripts/EditMode.gd` — Phases 2–6
+
+**Phase 2 — edit mode + per-point operations:**
+- New constants: `PATROL_POINT_PICK_RADIUS_M = 0.3` (right-click / drag pickup radius in world meters), `PATROL_MARKER_RADIUS_PX = 10.0` (screen-pixel circle radius).
+- New state: `_patrol_edit_mode: bool`, `_patrol_edit_guard_name: String` (pins the edited guard so mid-flight selection moves don't desync), `_patrol_drag_idx: int = -1`, `_patrol_drag_origin: Vector2` (for revert-on-unreachable).
+- Action methods (all directly callable so the headless test can drive them without simulating mouse events): `_patrol_toggle_edit_mode`, `_patrol_exit_edit_mode`, `_patrol_index_near(world_pos)`, `_patrol_add_point_at(world_pos)`, `_patrol_delete_at(world_pos)`, `_patrol_drag_begin/update/end`.
+- Undo cases added: `patrol_add` (removes the appended point), `patrol_delete` (re-inserts at original index with original position), `patrol_move` (restores the original position). All flow through the existing `undo_stack` so `Ctrl+Z` cascade behavior matches every other F4 edit and `_discard_changes` rewinds them.
+- Input wiring: `KEY_P` in the F4 keyboard handler routes to `_patrol_toggle_edit_mode`; `KEY_ESCAPE` exits patrol-edit before falling through to its existing palette-drag-cancel / quit cascade. While `_patrol_edit_mode` is true, mouse-button and motion handlers short-circuit through patrol routing (left-click → drag-or-add depending on `_patrol_index_near`; right-click → delete; motion → live drag-update). Other F4 mouse handlers (selection, drag-to-move, scale handles, multi-select) are suppressed via the same `_palette_dragging`-style early-return pattern.
+- Selection-change auto-exit: `_on_object_button_pressed` checks `_patrol_edit_mode` first and exits before committing the new selection. `_force_deactivate` exits patrol-edit too.
+- Marker rendering in `_draw`: red filled circle of radius `10/zoom` screen-px with a darker `1.5/zoom` border, white index number (1, 2, …) centered. Rendered for the currently-selected enemy regardless of edit-mode state — selecting a guard surfaces its route at a glance.
+- Phase 1 hint label "Press P to edit (Phase 2)" updated to "Press P to edit".
+
+**Phase 3 — pathfinder-routed line previews:**
+- New constants: `PATROL_ARC_STEPS = 16` (matches `PathPreview.ARC_STEPS` for visual consistency), `PATROL_LINE_W = 2.0`, `PATROL_DASH_ON/OFF = 8.0/6.0` (screen pixels), `COLOR_PATROL_REACHABLE = (0.3, 0.9, 1.0, 0.8)` (cyan), `COLOR_PATROL_UNREACHABLE = (1.0, 0.2, 0.2, 0.8)` (red).
+- New preload: `WorldObstaclesScript = preload("res://scripts/pathing/world_obstacles.gd")` (no `class_name` to avoid the editor-scan registration cost).
+- New state: `_patrol_line_cache: Dictionary` (guard_name → Array of `{reachable: bool, polyline: Array[Vector2] iso-pixel}` or `{reachable: false, p0/p1}`), `_show_all_patrols: bool`.
+- New methods:
+  - `_build_patrol_path_inputs` — mirrors `main.gd:_build_path` so the F4 preview reflects what the runtime pathfinder will see (hardcoded `level.get_wall_segments()` + `WorldObstacles.collect_wall_segments(level)` + chest obstacle).
+  - `_rebuild_patrol_line(guard_name)` — runs `Pathfinder.find_path` + `PathSmoother.smooth` per consecutive pair of points; samples each `MovePath` at 16 sub-steps per arc; projects via `IsoMath.project` and caches as a polyline. Unreachable segments cache the projected endpoints for the dashed-line fallback.
+  - `_movepath_to_polyline(mp)` — segment-sampling helper; matches `PathPreview._draw_path`'s fidelity exactly.
+  - `_draw_patrol_lines(guard_name, view_zoom)` — lazily rebuilds cache on miss; cyan solid for reachable, red dashed for unreachable.
+  - `_draw_dashed_line(p0, p1, col, line_w, z)` — 8 px on / 6 px off pattern with zoom-aware step sizing.
+  - `_invalidate_patrol_line(guard_name)` — single-guard cache eviction.
+- Cache invalidation strategy: `_persist()` clears the whole cache (covers add/delete/move/undo on patrol AND any other F4 edit that might move walls under existing routes). `_patrol_drag_update` invalidates the specific guard directly so the line follows the cursor in real-time without going through `_persist` (drag doesn't dirty-mark until release).
+- `O` key (no Ctrl) toggles `_show_all_patrols`. When `true`, every guard's line draws; when `false`, only the currently-selected enemy's. F4-scoped: `_force_deactivate` resets to `false`.
+- `_draw` order: patrol lines drawn first, then markers, so the numbered circles sit on top.
+
+**Phase 4 — Simulate Patrol button:**
+- New constants: `PATROL_BASE_SPEED_MPS = 1.25` (design.md guard speed).
+- New state: `_simulating: bool`, `_sim_tweens: Array[Tween]`, `_sim_pre_positions: Dictionary` (guard_name → Vector2 iso-pixel), `_sim_button: Button`.
+- New methods: `_toggle_simulate_patrol`, `_build_patrol_movepaths_pingpong(guard_name)` (returns `[]` for `<2` points or any unreachable segment — broken patrols refuse to simulate rather than animate through walls), `_find_guard_node(guard_name)`, `_set_guard_at_path_frac(guard, path, frac)` (stale guard refs no-op via `is_instance_valid`), `_start_patrol_simulation`, `_stop_patrol_simulation`, `_update_sim_button_label`.
+- One `Tween` per qualifying guard, created on the level root with `set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)` so it survives any game-pause F4 may trigger; `set_loops()` for forever-repeat. Forward (0→…→N-1) then backward (N-1→…→0) MovePaths queued sequentially; setter does `guard.global_position = IsoMath.project(path.position_at(frac))`. Backward paths are recomputed fresh (not reversed) because `PathSmoother`'s arc-choice can differ direction-wise.
+- Effective speed: `effective_movespeed` meta if present, else `1.25 m/s × GameManager.ANIMATION_SPEED_MULTIPLIER (5×) = 6.25 m/s`.
+- Button placement: appended to the palette panel between the asset scroll and the patrol section. Always visible (independent of selection) — spec: "Other F4 features remain available but tweens keep running." Label flips between "Simulate Patrol" / "Stop Simulation".
+- `KEY_P` no-ops while `_simulating` (gated inside `_patrol_toggle_edit_mode`).
+- `_force_deactivate` auto-stops sim and restores positions (covers F4 toggle-off, cross-mode switch to F5/F6, exit-confirm Discard).
+
+**Phase 5 unreachable-rejection extension (user-requested, not in original spec):**
+- New state: `_patrol_error_dialog: AcceptDialog = null` (lazily built on first error).
+- New methods: `_patrol_is_reachable(from, to)` — single-pair pathfinder check sharing inputs with the line-render path; `_show_patrol_unreachable_popup(msg)` — lazy AcceptDialog mounted on the F4 `_ui_layer`.
+- `_patrol_add_point_at` now refuses placement (no append, no undo) and pops the error if `pts.size() >= 1` and the new segment is unreachable.
+- `_patrol_drag_end` now checks BOTH touching segments (incoming from `pts[idx-1]` and outgoing to `pts[idx+1]`). If either fails, the point snaps back to `_patrol_drag_origin`, the cache is invalidated, and the popup fires — no undo entry. Mid-drag `_patrol_drag_update` is intentionally NOT gated; the red dashed line preview is the in-flight feedback.
+- Phase 3's red-dashed render branch isn't dead code: it still triggers when level walls move under previously-reachable points (or, post-Phase 5, when a save loads with points whose surroundings have since changed).
+
+**Phase 6 — help panel + this changelog:**
+- `SHORTCUTS` const extended with a `Patrol` category: P (toggle edit), Esc (exit edit), Left Click (add), Right Click (delete near a point), Drag (move), O (toggle all-guards visible). `ShortcutPanel.build` groups by first-seen category order — no rendering changes needed; the new section appears at the bottom and scrolls if the panel overflows its `MAX_HEIGHT_PX = 360`.
+
+### `scenes/level_1/level_1.gd` — patrol save/load
+
+- `save_edits_to(path)` now collects `_patrol_data` from the EditMode child and writes a top-level `patrols` array. Guards with 0 points are filtered out at save time (Phase 1 auto-creates empty entries on first selection; persisting those would bloat the save). Points serialized as `[[x, y], ...]` in world meters; `loop_mode` carried through (`"ping_pong"` default).
+- `_apply_saved_edits(path)` now calls `_apply_patrols(parsed.get("patrols", []))` AFTER `_apply_spawned_scenes` so palette-spawned guards exist when the name cross-check runs.
+- New method `_apply_patrols(patrols)`:
+  - Defensive: skip whole block if EditMode child or `_patrol_data` field is missing.
+  - For each entry, hydrate points to `Array[Vector2]`, write `_patrol_data[guard_name] = {points, loop_mode}` even if the guard is missing from `Objects` — spec: "keep it in patrol_data anyway in case the guard reappears, but log that this happened."
+  - `push_warning` per missing-guard reference so save drift is visible.
+  - Clears `_patrol_line_cache` after the load (the data didn't reach EditMode through `_persist`, so the cache wasn't auto-invalidated).
+- Backward compat: missing `patrols` key parses as empty array.
+
+## Save format addition — `user://level_1_edits.json` schema v2 (extended again)
+
+A new top-level `patrols` array alongside `transforms`, `deleted`, `spawned_scenes`. Per-entry shape:
+
+```
+{
+  "guard_name": "fake_enemy_1",
+  "points": [[x, y], [x, y], ...],
+  "loop_mode": "ping_pong"
+}
+```
+
+- `guard_name` matches the node name under `Objects/`.
+- `points` are world meters (the same unit Pathfinder operates in).
+- `loop_mode` is currently always `"ping_pong"`; reserved for future loop conventions.
+- Old saves missing `patrols` load cleanly (treated as empty array).
+- The `version` field stays at `2` — patrols are an additive backward-compatible extension, same precedent as `spawned_scenes` (added in the 2026-05-10 entry without bumping version).
+
+## Simulation behavior
+
+- Ping-pong cycle: forward (0→1→…→N-1) then backward (N-1→…→0). The renderer (Phase 3) and the simulation (Phase 4) both refuse to draw / animate a wrap-around segment from N-1 to 0 — that's the ping-pong contract.
+- Sim speed: `1.25 m/s` baseline × `GameManager.ANIMATION_SPEED_MULTIPLIER (5×)` = `6.25 m/s` effective. Per-guard override via `effective_movespeed` meta on the guard node.
+- Pre-simulate positions captured per guard at sim start and restored on stop OR on F4 deactivate. Sim is strictly F4-scoped — never carries state across mode switches.
+
+## Unreachable-rejection design note
+
+The spec ("Phase 3 — Patrol lines via pathfinder") originally framed unreachable segments as a render-only fallback (red dashed line). The user requested at the Phase 3 → Phase 4 boundary that unreachable placements be rejected outright with a popup. We kept the dashed-line render path because it still fires for the "level walls changed under existing patrol points" case and for Phase 5 saves whose surroundings have since changed.
+
+## Test convention note
+
+Two test gotchas worth recording for future patrol / pathfinder work:
+
+1. Autoloads (`IsoMath`, `GameManager`) are NOT in scope from `extends SceneTree` test scripts at compile time, even though they're registered as autoloads in `project.godot`. They ARE in scope from regular gameplay scripts (like `EditMode.gd`). Workaround in tests: inline the math (`IsoMath.project((0,0)) == Vector2.ZERO` so the assertion just compares against `Vector2.ZERO`).
+2. To force a `Pathfinder.find_path → []` (truly unreachable) in test geometry, use a **circular obstacle centered on the target**, not a closed wall box. A wall box doesn't enclose anything tighter than 2×CHAR_RADIUS so pathfinder routes through corners; `_segs_intersect` also treats endpoint-touching as non-blocking, which lets paths slip through wall tips.
+
+
 
 **Editor:** Banana
 **Scope:** F4 asset palette (panel UI + drag-to-spawn + save round-trip), Ctrl+C/V clipboard refactor, F6 asset-browser UX fix, pathfinder reads spawned-wall geometry from the scene tree.

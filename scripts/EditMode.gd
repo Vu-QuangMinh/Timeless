@@ -1,6 +1,10 @@
 extends Node2D
 
 const ShortcutPanelBuilder := preload("res://scripts/util/shortcut_panel.gd")
+# Phase 3 patrol-line rendering needs the same wall-extraction as main.gd's
+# pathfinder so what F4 previews matches what the game's runtime pathfinder
+# would compute. No class_name to avoid the editor-scan registration cost.
+const WorldObstaclesScript := preload("res://scripts/pathing/world_obstacles.gd")
 
 # Always-visible shortcut help panel (rendered bottom-right while F4 is active).
 const SHORTCUTS := [
@@ -17,6 +21,12 @@ const SHORTCUTS := [
 	{"category": "View",   "key": "Mouse Wheel", "desc": "Zoom camera"},
 	{"category": "View",   "key": "Arrows",      "desc": "Pan camera"},
 	{"category": "View",   "key": "Middle Drag", "desc": "Pan camera"},
+	{"category": "Patrol", "key": "P",           "desc": "Toggle patrol edit (enemy selected)"},
+	{"category": "Patrol", "key": "Esc",         "desc": "Exit patrol edit"},
+	{"category": "Patrol", "key": "Left Click",  "desc": "Add patrol point"},
+	{"category": "Patrol", "key": "Right Click", "desc": "Delete patrol point (near a point)"},
+	{"category": "Patrol", "key": "Drag",        "desc": "Move patrol point"},
+	{"category": "Patrol", "key": "O",           "desc": "Toggle all patrol lines visible"},
 ]
 
 @export var iso_angle_deg: float = 30.0
@@ -94,9 +104,47 @@ var _palette_list: VBoxContainer = null
 # persistence, and shortcuts.
 const PATROL_RECOGNITION_PRIORITY := 50  # F6 writes this meta on Enemy roots
 const PATROL_LOOP_MODE_PING_PONG := "ping_pong"
+const PATROL_POINT_PICK_RADIUS_M := 0.3  # right-click / drag pickup radius
+const PATROL_MARKER_RADIUS_PX := 10.0    # screen-px circle radius (pre-zoom)
 var _patrol_data: Dictionary = {}
 var _patrol_section: VBoxContainer = null
 var _patrol_status_label: Label = null
+
+# Phase 2 edit mode. `_patrol_edit_guard_name` pins the guard we're editing
+# (in case selection changes; though selection-change auto-exits the mode).
+# `_patrol_drag_idx` is -1 when not dragging a point.
+var _patrol_edit_mode: bool = false
+var _patrol_edit_guard_name: String = ""
+var _patrol_drag_idx: int = -1
+var _patrol_drag_origin: Vector2 = Vector2.ZERO
+
+# Phase 3 patrol-line rendering. Cache keyed by guard name → Array of segment
+# dicts. Reachable segments carry {reachable: true, polyline: Array[Vector2]
+# in iso-pixel space (already projected via IsoMath.project)}. Unreachable
+# segments carry {reachable: false, p0/p1: Vector2 iso-pixel} so the dashed
+# fallback can draw a straight projected line. Cleared on any edit.
+const PATROL_ARC_STEPS := 16            # matches PathPreview.ARC_STEPS
+const PATROL_LINE_W := 2.0              # screen pixels
+const PATROL_DASH_ON := 8.0             # screen pixels
+const PATROL_DASH_OFF := 6.0            # screen pixels
+const COLOR_PATROL_REACHABLE := Color(0.3, 0.9, 1.0, 0.8)
+const COLOR_PATROL_UNREACHABLE := Color(1.0, 0.2, 0.2, 0.8)
+var _patrol_line_cache: Dictionary = {}
+var _show_all_patrols: bool = false     # O toggle, F4-only, resets on deactivate
+
+# Lazy AcceptDialog instance for "can't place — unreachable" pops. Built on
+# first error so we don't pay for a dialog that never shows.
+var _patrol_error_dialog: AcceptDialog = null
+
+# Phase 4 simulation. Tweens are created on the level root (one per guard with
+# ≥2 reachable patrol points), looped, and set to TWEEN_PAUSE_PROCESS so they
+# survive any game-pause F4 may trigger. Pre-positions snapshot global_position
+# at start so we can restore on stop. Sim auto-stops on F4 deactivate.
+const PATROL_BASE_SPEED_MPS := 1.25     # design.md guard speed
+var _simulating: bool = false
+var _sim_tweens: Array[Tween] = []
+var _sim_pre_positions: Dictionary = {}  # guard_name → Vector2 (iso pixels)
+var _sim_button: Button = null
 
 # Drag state. While `_palette_dragging` is true, F4's existing left-click /
 # motion handlers early-return so the palette owns the mouse. Drag start is
@@ -274,6 +322,15 @@ func _build_palette_panel() -> void:
 	_palette_list.add_theme_constant_override("separation", 2)
 	scroll.add_child(_palette_list)
 
+	# Simulate Patrol button — Phase 4. Always visible (independent of any
+	# enemy selection) so the user can toggle while editing other things.
+	v.add_child(HSeparator.new())
+	_sim_button = Button.new()
+	_sim_button.text = "Simulate Patrol"
+	_sim_button.add_theme_font_size_override("font_size", 11)
+	_sim_button.pressed.connect(_toggle_simulate_patrol)
+	v.add_child(_sim_button)
+
 	# Patrol section. Visible only when the user selects an enemy node
 	# (recognition_priority == 50). Phase 1 just shows the point count; Phases
 	# 2-6 add edit-mode toggles, line rendering, simulate button, etc.
@@ -292,7 +349,7 @@ func _build_palette_panel() -> void:
 	_patrol_status_label.add_theme_font_size_override("font_size", 10)
 	_patrol_section.add_child(_patrol_status_label)
 	var patrol_hint := Label.new()
-	patrol_hint.text = "Press P to edit (Phase 2)"
+	patrol_hint.text = "Press P to edit"
 	patrol_hint.add_theme_font_size_override("font_size", 9)
 	patrol_hint.add_theme_color_override("font_color", Color(0.7, 0.7, 0.75))
 	_patrol_section.add_child(patrol_hint)
@@ -694,6 +751,437 @@ func _update_patrol_panel() -> void:
 	_patrol_section.visible = true
 
 
+# ── Patrol routes (Phase 2) ────────────────────────────────────────────────
+
+# P key entry point. No-op unless an enemy is currently selected. While
+# patrol-edit is on, F4's normal viewport input is routed to patrol handlers.
+func _patrol_toggle_edit_mode() -> void:
+	# Phase 4: P is ignored during simulation. Spec requires patrol-edit be
+	# force-exited at sim start (handled in _start_patrol_simulation) and the
+	# key itself be a no-op while sim runs.
+	if _simulating:
+		return
+	if _patrol_edit_mode:
+		_patrol_exit_edit_mode()
+		return
+	var enemy := _selected_enemy()
+	if enemy == null:
+		return
+	# Cancel any in-progress F4 drag/scale before taking input ownership.
+	mode = "idle"
+	_drag_starts.clear()
+	_patrol_edit_mode = true
+	_patrol_edit_guard_name = str(enemy.name)
+	Input.set_default_cursor_shape(Input.CURSOR_CROSS)
+	_update_patrol_panel()
+	queue_redraw()
+
+
+func _patrol_exit_edit_mode() -> void:
+	if not _patrol_edit_mode:
+		return
+	# Mid-drag exit: finalize the drag (pushes undo if it moved).
+	if _patrol_drag_idx >= 0:
+		_patrol_drag_end()
+	_patrol_edit_mode = false
+	_patrol_edit_guard_name = ""
+	Input.set_default_cursor_shape(Input.CURSOR_ARROW)
+	_update_patrol_panel()
+	queue_redraw()
+
+
+# Index of the closest patrol point to `world_pos` within
+# PATROL_POINT_PICK_RADIUS_M, or -1. Operates on the currently-edited guard.
+func _patrol_index_near(world_pos: Vector2) -> int:
+	if _patrol_edit_guard_name == "":
+		return -1
+	if not _patrol_data.has(_patrol_edit_guard_name):
+		return -1
+	var pts: Array = (_patrol_data[_patrol_edit_guard_name] as Dictionary)["points"]
+	var best := -1
+	var best_d := PATROL_POINT_PICK_RADIUS_M
+	for i in pts.size():
+		var d := (pts[i] as Vector2).distance_to(world_pos)
+		if d <= best_d:
+			best_d = d
+			best = i
+	return best
+
+
+func _patrol_add_point_at(world_pos: Vector2) -> void:
+	if not _patrol_edit_mode:
+		return
+	var entry := _patrol_entry_for(_patrol_edit_guard_name)
+	var pts: Array = entry["points"]
+	# Any point past the first must be reachable from the prior point. If the
+	# pathfinder returns empty, refuse the placement and pop an error — the
+	# user can re-aim instead of leaving a dashed/broken segment in the route.
+	if pts.size() >= 1 and not _patrol_is_reachable(pts[pts.size() - 1] as Vector2, world_pos):
+		_show_patrol_unreachable_popup(
+			"Can't place this patrol point — no path from the previous point.\nMove closer or place around obstacles.")
+		return
+	pts.append(world_pos)
+	_push_undo({
+		"action": "patrol_add",
+		"guard": _patrol_edit_guard_name,
+		"index": pts.size() - 1,
+	})
+	_persist()
+	_update_patrol_panel()
+	queue_redraw()
+
+
+func _patrol_delete_at(world_pos: Vector2) -> bool:
+	if not _patrol_edit_mode:
+		return false
+	var idx := _patrol_index_near(world_pos)
+	if idx < 0:
+		return false
+	var entry := _patrol_entry_for(_patrol_edit_guard_name)
+	var pts: Array = entry["points"]
+	var pos: Vector2 = pts[idx]
+	pts.remove_at(idx)
+	_push_undo({
+		"action": "patrol_delete",
+		"guard": _patrol_edit_guard_name,
+		"index": idx,
+		"position": pos,
+	})
+	_persist()
+	_update_patrol_panel()
+	queue_redraw()
+	return true
+
+
+func _patrol_drag_begin(world_pos: Vector2) -> bool:
+	if not _patrol_edit_mode:
+		return false
+	var idx := _patrol_index_near(world_pos)
+	if idx < 0:
+		return false
+	var pts: Array = (_patrol_data[_patrol_edit_guard_name] as Dictionary)["points"]
+	_patrol_drag_idx = idx
+	_patrol_drag_origin = pts[idx]
+	return true
+
+
+func _patrol_drag_update(world_pos: Vector2) -> void:
+	if _patrol_drag_idx < 0:
+		return
+	var pts: Array = (_patrol_data[_patrol_edit_guard_name] as Dictionary)["points"]
+	pts[_patrol_drag_idx] = world_pos
+	# Drag doesn't go through _persist (only drag_end does), so invalidate the
+	# line cache directly so the rebuild picks up the moved point each frame.
+	_invalidate_patrol_line(_patrol_edit_guard_name)
+	queue_redraw()
+
+
+func _patrol_drag_end() -> void:
+	if _patrol_drag_idx < 0:
+		return
+	var pts: Array = (_patrol_data[_patrol_edit_guard_name] as Dictionary)["points"]
+	var final_pos: Vector2 = pts[_patrol_drag_idx]
+	if final_pos != _patrol_drag_origin:
+		# Both touching segments must still be reachable — incoming from the
+		# prior point and outgoing to the next one. If either fails, snap back
+		# to the drag origin (no undo entry pushed).
+		var idx := _patrol_drag_idx
+		var rejected := false
+		if idx > 0 and not _patrol_is_reachable(pts[idx - 1] as Vector2, final_pos):
+			rejected = true
+		if not rejected and idx + 1 < pts.size() \
+				and not _patrol_is_reachable(final_pos, pts[idx + 1] as Vector2):
+			rejected = true
+		if rejected:
+			pts[idx] = _patrol_drag_origin
+			_invalidate_patrol_line(_patrol_edit_guard_name)
+			_show_patrol_unreachable_popup(
+				"Can't move this patrol point there — no path to or from an adjacent point.")
+			queue_redraw()
+		else:
+			_push_undo({
+				"action": "patrol_move",
+				"guard": _patrol_edit_guard_name,
+				"index": _patrol_drag_idx,
+				"position": _patrol_drag_origin,
+			})
+			_persist()
+	_patrol_drag_idx = -1
+	_patrol_drag_origin = Vector2.ZERO
+
+
+# ── Patrol lines (Phase 3) ─────────────────────────────────────────────────
+
+func _invalidate_patrol_line(guard_name: String) -> void:
+	_patrol_line_cache.erase(guard_name)
+
+
+# Pulls wall geometry + obstacles in the same shape main.gd's _build_path
+# does, so the F4 preview matches what the runtime guard pathfinder would see.
+func _build_patrol_path_inputs() -> Dictionary:
+	var lvl := get_parent()
+	var wall_segs: Array = []
+	var obstacles: Array = []
+	if lvl != null:
+		if lvl.has_method("get_wall_segments"):
+			wall_segs = lvl.get_wall_segments()
+		wall_segs.append_array(WorldObstaclesScript.collect_wall_segments(lvl))
+		if lvl.has_method("get_chest_obstacle"):
+			var chest: Dictionary = lvl.get_chest_obstacle()
+			if chest.get("radius", 0.0) > 0.0:
+				obstacles.append(chest)
+	return {"walls": wall_segs, "obstacles": obstacles}
+
+
+# Lazily rebuilds the polyline cache for a single guard. Called by the
+# renderer on demand; idempotent.
+func _rebuild_patrol_line(guard_name: String) -> void:
+	if not _patrol_data.has(guard_name):
+		_patrol_line_cache.erase(guard_name)
+		return
+	var pts: Array = (_patrol_data[guard_name] as Dictionary)["points"]
+	if pts.size() < 2:
+		_patrol_line_cache[guard_name] = []
+		return
+	var inputs := _build_patrol_path_inputs()
+	var pf := Pathfinder.new()
+	pf.setup(inputs["walls"], inputs["obstacles"])
+	var smoother := PathSmoother.new()
+	var segs: Array = []
+	for i in range(pts.size() - 1):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[i + 1]
+		var waypoints: Array = pf.find_path(a, b)
+		if waypoints.is_empty():
+			segs.append({
+				"reachable": false,
+				"p0": IsoMath.project(a),
+				"p1": IsoMath.project(b),
+			})
+			continue
+		var mp: MovePath = smoother.smooth(waypoints, inputs["walls"], inputs["obstacles"])
+		if mp == null:
+			segs.append({
+				"reachable": false,
+				"p0": IsoMath.project(a),
+				"p1": IsoMath.project(b),
+			})
+			continue
+		segs.append({"reachable": true, "polyline": _movepath_to_polyline(mp)})
+	_patrol_line_cache[guard_name] = segs
+
+
+# Samples a MovePath at the same fidelity PathPreview uses (16 steps per arc,
+# line segments use their endpoints) and projects each vertex to iso pixels.
+func _movepath_to_polyline(mp: MovePath) -> Array:
+	var out: Array = []
+	for i in mp._segments.size():
+		var seg: MovePath.Segment = mp._segments[i]
+		if not seg.is_arc:
+			if out.is_empty():
+				out.append(IsoMath.project(seg.start))
+			out.append(IsoMath.project(seg.end))
+		else:
+			var p0 := seg.center + Vector2(cos(seg.from_angle), sin(seg.from_angle)) * seg.radius
+			if out.is_empty():
+				out.append(IsoMath.project(p0))
+			for k in range(1, PATROL_ARC_STEPS + 1):
+				var t := float(k) / float(PATROL_ARC_STEPS)
+				var angle := seg.from_angle + (seg.to_angle - seg.from_angle) * t
+				var p := seg.center + Vector2(cos(angle), sin(angle)) * seg.radius
+				out.append(IsoMath.project(p))
+	return out
+
+
+# Draws the cached patrol line for one guard. Lazily rebuilds on cache miss.
+func _draw_patrol_lines(guard_name: String, view_zoom: Vector2) -> void:
+	if not _patrol_line_cache.has(guard_name):
+		_rebuild_patrol_line(guard_name)
+	var segs: Array = _patrol_line_cache.get(guard_name, [])
+	if segs.is_empty():
+		return
+	var z := maxf(view_zoom.x, 0.0001)
+	var line_w := PATROL_LINE_W / z
+	for seg in segs:
+		if bool(seg.get("reachable", false)):
+			var polyline: Array = seg["polyline"]
+			for i in range(polyline.size() - 1):
+				draw_line(polyline[i], polyline[i + 1], COLOR_PATROL_REACHABLE, line_w)
+		else:
+			_draw_dashed_line(seg["p0"], seg["p1"], COLOR_PATROL_UNREACHABLE, line_w, z)
+
+
+# Single-pair reachability check using the same wall + obstacle inputs the
+# patrol-line renderer uses. Returns false iff Pathfinder.find_path is empty.
+func _patrol_is_reachable(from: Vector2, to: Vector2) -> bool:
+	var inputs := _build_patrol_path_inputs()
+	var pf := Pathfinder.new()
+	pf.setup(inputs["walls"], inputs["obstacles"])
+	return not pf.find_path(from, to).is_empty()
+
+
+func _show_patrol_unreachable_popup(msg: String) -> void:
+	if _patrol_error_dialog == null:
+		_patrol_error_dialog = AcceptDialog.new()
+		_patrol_error_dialog.title = "Patrol Point Unreachable"
+		# Mount on the existing F4 UI layer so it sits above the world.
+		if _ui_layer != null:
+			_ui_layer.add_child(_patrol_error_dialog)
+		else:
+			add_child(_patrol_error_dialog)
+	_patrol_error_dialog.dialog_text = msg
+	_patrol_error_dialog.popup_centered()
+
+
+# ── Patrol simulation (Phase 4) ────────────────────────────────────────────
+
+func _toggle_simulate_patrol() -> void:
+	if _simulating:
+		_stop_patrol_simulation()
+	else:
+		_start_patrol_simulation()
+
+
+# Builds forward + backward MovePaths for one guard (ping-pong). Returns an
+# empty array if any segment is unreachable or if the guard has < 2 points —
+# we refuse to simulate broken patrols rather than animate through walls.
+func _build_patrol_movepaths_pingpong(guard_name: String) -> Array:
+	if not _patrol_data.has(guard_name):
+		return []
+	var pts: Array = (_patrol_data[guard_name] as Dictionary)["points"]
+	if pts.size() < 2:
+		return []
+	var inputs := _build_patrol_path_inputs()
+	var pf := Pathfinder.new()
+	pf.setup(inputs["walls"], inputs["obstacles"])
+	var smoother := PathSmoother.new()
+	var paths: Array = []
+	# Forward: 0 → 1 → ... → N-1
+	for i in range(pts.size() - 1):
+		var wpts: Array = pf.find_path(pts[i], pts[i + 1])
+		if wpts.is_empty():
+			return []
+		var mp: MovePath = smoother.smooth(wpts, inputs["walls"], inputs["obstacles"])
+		if mp == null:
+			return []
+		paths.append(mp)
+	# Backward: N-1 → N-2 → ... → 0. Recomputed (not just reversed) because
+	# smoothing's arc choices differ by direction.
+	for i in range(pts.size() - 1, 0, -1):
+		var wpts2: Array = pf.find_path(pts[i], pts[i - 1])
+		if wpts2.is_empty():
+			return []
+		var mp2: MovePath = smoother.smooth(wpts2, inputs["walls"], inputs["obstacles"])
+		if mp2 == null:
+			return []
+		paths.append(mp2)
+	return paths
+
+
+func _find_guard_node(guard_name: String) -> Node2D:
+	var lvl := get_parent()
+	if lvl == null:
+		return null
+	var objects := lvl.get_node_or_null("Objects")
+	if objects == null:
+		return null
+	var node := objects.get_node_or_null(guard_name)
+	if node == null or not (node is Node2D):
+		return null
+	return node as Node2D
+
+
+# Tween setter. Frac is the eased 0..1 progress along `path`. position_at
+# returns world meters; project to iso pixels for the scene's coordinate
+# space. Stale guard refs (deleted mid-sim) silently no-op.
+func _set_guard_at_path_frac(guard: Node2D, path: MovePath, frac: float) -> void:
+	if not is_instance_valid(guard):
+		return
+	guard.global_position = IsoMath.project(path.position_at(frac))
+
+
+func _start_patrol_simulation() -> void:
+	# Spec: simulation is F4-only.
+	if not active:
+		return
+	# Force-exit patrol-edit before starting (spec: "patrol-edit is force-exited if active").
+	if _patrol_edit_mode:
+		_patrol_exit_edit_mode()
+	var lvl := get_parent()
+	if lvl == null:
+		return
+	_sim_pre_positions.clear()
+	_sim_tweens.clear()
+	var any_started := false
+	for guard_name in _patrol_data.keys():
+		var paths := _build_patrol_movepaths_pingpong(guard_name)
+		if paths.is_empty():
+			continue
+		var guard_node := _find_guard_node(guard_name)
+		if guard_node == null:
+			continue
+		_sim_pre_positions[guard_name] = guard_node.global_position
+		var base_speed := PATROL_BASE_SPEED_MPS
+		if guard_node.has_meta("effective_movespeed"):
+			base_speed = float(guard_node.get_meta("effective_movespeed"))
+		var effective_speed := base_speed * GameManager.ANIMATION_SPEED_MULTIPLIER
+		var t := lvl.create_tween()
+		t.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+		t.set_loops()
+		for path in paths:
+			var dur: float = (path as MovePath).total_length() / maxf(effective_speed, 0.001)
+			var path_ref: MovePath = path
+			var node_ref: Node2D = guard_node
+			t.tween_method(
+				func(frac: float) -> void: _set_guard_at_path_frac(node_ref, path_ref, frac),
+				0.0, 1.0, dur,
+			)
+		_sim_tweens.append(t)
+		any_started = true
+	if not any_started:
+		# Nothing to simulate — toggle stays off so the button label is honest.
+		return
+	_simulating = true
+	_update_sim_button_label()
+
+
+func _stop_patrol_simulation() -> void:
+	for t in _sim_tweens:
+		if t != null and is_instance_valid(t):
+			t.kill()
+	_sim_tweens.clear()
+	for guard_name in _sim_pre_positions.keys():
+		var node := _find_guard_node(guard_name)
+		if node != null:
+			node.global_position = _sim_pre_positions[guard_name]
+	_sim_pre_positions.clear()
+	_simulating = false
+	_update_sim_button_label()
+
+
+func _update_sim_button_label() -> void:
+	if _sim_button != null:
+		_sim_button.text = "Stop Simulation" if _simulating else "Simulate Patrol"
+
+
+# Dashes are sized in screen pixels; iso-pixel local lengths divide by zoom so
+# the pattern doesn't grow / shrink with camera zoom.
+func _draw_dashed_line(p0: Vector2, p1: Vector2, col: Color, line_w: float, z: float) -> void:
+	var dash_on := PATROL_DASH_ON / z
+	var dash_off := PATROL_DASH_OFF / z
+	var period := dash_on + dash_off
+	var total := p0.distance_to(p1)
+	if total < 0.0001:
+		return
+	var dir := (p1 - p0) / total
+	var t := 0.0
+	while t < total:
+		var a := p0 + dir * t
+		var b := p0 + dir * minf(t + dash_on, total)
+		draw_line(a, b, col, line_w)
+		t += period
+
+
 func _mirror_selected() -> void:
 	if multi_selected.size() == 0:
 		return
@@ -736,6 +1224,10 @@ func _on_object_button_pressed(node: Node2D) -> void:
 	if not is_instance_valid(node):
 		_refresh_object_list()
 		return
+	# Panel selection changes auto-exit patrol-edit; user can press P to re-enter
+	# on the new selection if it's an enemy.
+	if _patrol_edit_mode:
+		_patrol_exit_edit_mode()
 	if Input.is_key_pressed(KEY_SHIFT):
 		if node in multi_selected:
 			multi_selected.erase(node)
@@ -764,6 +1256,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Esc cancels a palette drag without quitting the game.
 			if _palette_dragging:
 				_cancel_palette_drag()
+				get_viewport().set_input_as_handled()
+				return
+			# Esc exits patrol-edit mode without quitting.
+			if _patrol_edit_mode:
+				_patrol_exit_edit_mode()
 				get_viewport().set_input_as_handled()
 				return
 			get_tree().quit()
@@ -799,6 +1296,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				_delete_selected()
 			elif event.keycode == KEY_M and selected and not event.ctrl_pressed:
 				_mirror_selected()
+			elif event.keycode == KEY_P and not event.ctrl_pressed:
+				_patrol_toggle_edit_mode()
+			elif event.keycode == KEY_O and not event.ctrl_pressed:
+				_show_all_patrols = not _show_all_patrols
+				queue_redraw()
 		get_viewport().set_input_as_handled()
 		return
 
@@ -808,6 +1310,21 @@ func _unhandled_input(event: InputEvent) -> void:
 		# Palette owns the mouse during drag — suppress F4's selection /
 		# scene-drag / scale-handle handlers without rewriting them.
 		if _palette_dragging:
+			get_viewport().set_input_as_handled()
+			return
+		# Patrol-edit owns the mouse: left-click adds (or drags a nearby point),
+		# right-click deletes a nearby point. Other F4 left-click handlers
+		# (selection, drag-to-move, scale handles) are suppressed.
+		if _patrol_edit_mode:
+			var wp := IsoMath.unproject(get_global_mouse_position())
+			if event.button_index == MOUSE_BUTTON_LEFT:
+				if event.pressed:
+					if not _patrol_drag_begin(wp):
+						_patrol_add_point_at(wp)
+				else:
+					_patrol_drag_end()
+			elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+				_patrol_delete_at(wp)
 			get_viewport().set_input_as_handled()
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
@@ -832,6 +1349,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		# Palette drag updates ghost via _process polling — don't let F4's
 		# drag/scale tools react to mouse motion while a drag is active.
 		if _palette_dragging:
+			get_viewport().set_input_as_handled()
+			return
+		# Patrol-edit: only react to motion while actively dragging a point.
+		if _patrol_edit_mode:
+			if _patrol_drag_idx >= 0:
+				_patrol_drag_update(IsoMath.unproject(get_global_mouse_position()))
 			get_viewport().set_input_as_handled()
 			return
 		if mode == "drag" and selected:
@@ -1094,6 +1617,32 @@ func _undo() -> void:
 					n.get_parent().remove_child(n)
 				n.queue_free()
 				selected = null
+		"patrol_add":
+			var g: String = e["guard"]
+			var i: int = e["index"]
+			if _patrol_data.has(g):
+				var pts: Array = (_patrol_data[g] as Dictionary)["points"]
+				if i >= 0 and i < pts.size():
+					pts.remove_at(i)
+			_update_patrol_panel()
+		"patrol_delete":
+			var g2: String = e["guard"]
+			var i2: int = e["index"]
+			var p2: Vector2 = e["position"]
+			var entry := _patrol_entry_for(g2)
+			var pts2: Array = entry["points"]
+			var insert_at: int = clampi(i2, 0, pts2.size())
+			pts2.insert(insert_at, p2)
+			_update_patrol_panel()
+		"patrol_move":
+			var g3: String = e["guard"]
+			var i3: int = e["index"]
+			var p3: Vector2 = e["position"]
+			if _patrol_data.has(g3):
+				var pts3: Array = (_patrol_data[g3] as Dictionary)["points"]
+				if i3 >= 0 and i3 < pts3.size():
+					pts3[i3] = p3
+			_update_patrol_panel()
 	_persist()
 	_refresh_object_list()
 
@@ -1171,6 +1720,9 @@ func _smart_copy_name(parent: Node, source_name: String) -> String:
 
 func _persist() -> void:
 	# Edits are now batched: mark dirty, write only on explicit Save / Save As.
+	# Any edit may change wall geometry under F4-spawned StaticBody2Ds, so blow
+	# the patrol-line cache so the next draw rebuilds against current walls.
+	_patrol_line_cache.clear()
 	_mark_dirty()
 
 
@@ -1270,6 +1822,15 @@ func _force_deactivate() -> void:
 		return
 	if _palette_dragging:
 		_cancel_palette_drag()
+	if _patrol_edit_mode:
+		_patrol_exit_edit_mode()
+	# Phase 4: simulation is F4-only — auto-stop and restore positions when
+	# leaving the mode (covers F4-off, switch to F5/F6, and discard exits).
+	if _simulating:
+		_stop_patrol_simulation()
+	# Phase 3: O state is F4-scoped per spec — reset on deactivate.
+	_show_all_patrols = false
+	_patrol_line_cache.clear()
 	active = false
 	selected = null
 	multi_selected.clear()
@@ -1414,3 +1975,45 @@ func _draw() -> void:
 	var bg_rect := Rect2(text_pos + Vector2(-pad, -text_size.y), text_size + Vector2(pad * 2.0, pad))
 	draw_rect(bg_rect, Color(0, 0, 0, 0.55), true)
 	draw_string(font, text_pos, coord_text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, cursor_coord_color)
+
+	# Patrol lines: if O is on, every guard's line; else only the selected
+	# guard's. Drawn before markers so the numbered circles render on top.
+	var selected_enemy := _selected_enemy()
+	if _show_all_patrols:
+		for guard_name in _patrol_data.keys():
+			_draw_patrol_lines(guard_name, view_zoom)
+	elif selected_enemy != null:
+		_draw_patrol_lines(str(selected_enemy.name), view_zoom)
+
+	# Patrol markers render for the currently-selected enemy regardless of
+	# edit-mode state — selecting a guard shows its route at a glance.
+	if selected_enemy != null:
+		_draw_patrol_markers(selected_enemy, view_zoom)
+
+
+# Numbered red circles at IsoMath.project(point_world_meters). EditMode is a
+# Node2D at world origin (0, 0) so global iso pixels == _draw local coords.
+func _draw_patrol_markers(guard: Node, view_zoom: Vector2) -> void:
+	if not _patrol_data.has(str(guard.name)):
+		return
+	var pts: Array = (_patrol_data[str(guard.name)] as Dictionary)["points"]
+	if pts.is_empty():
+		return
+	var z := maxf(view_zoom.x, 0.0001)
+	var radius_px := PATROL_MARKER_RADIUS_PX / z
+	var line_w := 1.5 / z
+	var marker_font := ThemeDB.fallback_font
+	var marker_font_size: int = max(9, int(11.0 / z))
+	var fill := Color(0.95, 0.2, 0.2, 0.92)
+	var border := Color(0.55, 0.05, 0.05, 0.95)
+	for i in pts.size():
+		var screen := IsoMath.project(pts[i] as Vector2)
+		draw_circle(screen, radius_px, fill)
+		draw_arc(screen, radius_px, 0.0, TAU, 24, border, line_w, true)
+		var label := str(i + 1)
+		var ts: Vector2 = marker_font.get_string_size(
+			label, HORIZONTAL_ALIGNMENT_LEFT, -1, marker_font_size)
+		var label_pos := screen + Vector2(-ts.x * 0.5, marker_font_size * 0.35)
+		draw_string(
+			marker_font, label_pos, label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, marker_font_size, Color.WHITE)

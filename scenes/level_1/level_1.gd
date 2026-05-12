@@ -96,6 +96,12 @@ func _apply_saved_edits(path: String) -> void:
 	if typeof(spawned) == TYPE_ARRAY:
 		_apply_spawned_scenes(spawned)
 
+	# Phase 5 patrol persistence. Run AFTER spawned_scenes so palette-spawned
+	# guards exist when we cross-check guard_name. Missing-key path is empty.
+	var patrols: Variant = parsed.get("patrols", [])
+	if typeof(patrols) == TYPE_ARRAY:
+		_apply_patrols(patrols)
+
 
 func _apply_spawned_scenes(spawned: Array) -> void:
 	for entry in spawned:
@@ -143,6 +149,39 @@ func _apply_spawned_scenes(spawned: Array) -> void:
 			node.add_to_group("editable")
 		node.set_meta("palette_source", src)
 		node.set_meta("palette_type", ptype)
+
+
+func _apply_patrols(patrols: Array) -> void:
+	var em := get_node_or_null("EditMode")
+	if em == null or not ("_patrol_data" in em):
+		push_warning("level_1: EditMode child missing or no _patrol_data — patrol load skipped")
+		return
+	var objects := get_node_or_null("Objects")
+	var pdata: Dictionary = em.get("_patrol_data")
+	for entry in patrols:
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		var guard_name := str(entry.get("guard_name", ""))
+		if guard_name == "":
+			continue
+		var raw_pts: Variant = entry.get("points", [])
+		if typeof(raw_pts) != TYPE_ARRAY:
+			continue
+		var points: Array[Vector2] = []
+		for pt in raw_pts:
+			if typeof(pt) == TYPE_ARRAY and (pt as Array).size() >= 2:
+				points.append(Vector2(float((pt as Array)[0]), float((pt as Array)[1])))
+		var loop_mode := str(entry.get("loop_mode", "ping_pong"))
+		# Always keep the data in memory, even when the named guard isn't in
+		# the scene — design.md spec: "keep it in patrol_data anyway in case
+		# the guard reappears, but log that this happened."
+		pdata[guard_name] = {"points": points, "loop_mode": loop_mode}
+		if objects == null or objects.get_node_or_null(guard_name) == null:
+			push_warning("level_1: patrol data references guard '%s' but no such node in Objects. Data kept in memory in case the guard reappears." % guard_name)
+	# Restored data wasn't reached through _persist, so the line cache wasn't
+	# auto-cleared. Drop it now so the next draw rebuilds against loaded points.
+	if "_patrol_line_cache" in em:
+		(em.get("_patrol_line_cache") as Dictionary).clear()
 
 
 func _apply_transform_to_node(node: Node, e: Dictionary) -> void:
@@ -211,6 +250,28 @@ func save_edits_to(path: String) -> String:
 		if not current_keys.has(bk):
 			deleted_keys.append(bk)
 
+	# Phase 5 patrol persistence: EditMode owns `_patrol_data` (Dictionary
+	# keyed by guard node name). Serialize each guard's points as [[x, y], ...]
+	# in world meters. Guards with 0 points are NOT persisted — they get
+	# auto-created on first selection by EditMode's Phase 1 code anyway.
+	var patrols := []
+	var em := get_node_or_null("EditMode")
+	if em != null and "_patrol_data" in em:
+		var pdata: Dictionary = em.get("_patrol_data")
+		for guard_name in pdata.keys():
+			var entry: Dictionary = pdata[guard_name]
+			var pts: Array = entry.get("points", [])
+			if pts.is_empty():
+				continue
+			var serialized_pts := []
+			for p in pts:
+				serialized_pts.append([(p as Vector2).x, (p as Vector2).y])
+			patrols.append({
+				"guard_name": str(guard_name),
+				"points": serialized_pts,
+				"loop_mode": str(entry.get("loop_mode", "ping_pong")),
+			})
+
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		return "Could not open %s for writing (error %d)" % [path, FileAccess.get_open_error()]
@@ -219,6 +280,7 @@ func save_edits_to(path: String) -> String:
 		"transforms": transforms,
 		"deleted": deleted_keys,
 		"spawned_scenes": spawned_scenes,
+		"patrols": patrols,
 	}, "\t"))
 	f.close()
 	current_edits_path = path
