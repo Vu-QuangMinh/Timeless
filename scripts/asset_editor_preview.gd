@@ -1,17 +1,15 @@
 extends Control
 
 # Center preview Control for the F6 Asset Editor.
-# Renders: dark/checker background, the loaded PNG (centered, scaled by zoom),
-# completed polygons (translucent fill + outline + vertex dots), and an
-# in-progress polygon (lines + dots + rubber-band line to the cursor).
-# Forwards mouse and zoom intent to the parent editor via signals; the parent
-# owns the polygon array and tool state.
+# Renders: dark/checker background, loaded PNG, completed polygons,
+# in-progress polygon, and supports vertex dragging in TOOL_NONE mode.
 
 signal vertex_placed(image_px: Vector2)
 signal polygon_close_requested
 signal eraser_clicked(image_px: Vector2)
 signal mouse_moved(image_px: Vector2, in_image: bool)
-signal zoom_step(delta: int)  # +1 wheel up, -1 wheel down
+signal zoom_step(delta: int)
+signal vertex_dragged(poly_idx: int, vert_idx: int, new_pos: Vector2)
 
 const TOOL_NONE := 0
 const TOOL_RED := 1
@@ -22,18 +20,18 @@ const COLOR_COLLISION := Color(1.0, 0.2, 0.2)
 const COLOR_RECOGNITION := Color(1.0, 0.9, 0.2)
 const FILL_ALPHA := 0.25
 const VERTEX_RADIUS_PX := 3.0
+const VERTEX_HIT_RADIUS := 8.0
 const OUTLINE_WIDTH_PX := 1.0
-const RUBBER_BAND_DASH := 8.0  # pixels per dash segment
+const RUBBER_BAND_DASH := 8.0
 const CHECKER_SIZE_PX := 16.0
 const CHECKER_A := Color(0.18, 0.18, 0.20)
 const CHECKER_B := Color(0.26, 0.26, 0.28)
+const COLOR_HOVER := Color(1.0, 1.0, 1.0, 0.9)
 
 var texture: Texture2D = null
-var image_size: Vector2 = Vector2.ZERO  # px
+var image_size: Vector2 = Vector2.ZERO
 var zoom: float = 4.0
 
-# Polygon list owned by the parent editor; we just render it.
-# Each entry: {"type": "collision"|"recognition", "vertices": PackedVector2Array (image px)}
 var polygons: Array = []
 var in_progress: PackedVector2Array = PackedVector2Array()
 var current_tool: int = TOOL_NONE
@@ -41,6 +39,13 @@ var highlighted_index: int = -1
 
 var _local_mouse: Vector2 = Vector2(-1, -1)
 var _mouse_inside: bool = false
+
+var _hover_poly: int = -1
+var _hover_vert: int = -1
+var _drag_poly: int = -1
+var _drag_vert: int = -1
+var _drag_active: bool = false
+var _drag_current_pos: Vector2 = Vector2.ZERO
 
 
 func _ready() -> void:
@@ -62,6 +67,8 @@ func set_zoom(z: float) -> void:
 
 func set_polygons(arr: Array) -> void:
 	polygons = arr
+	_hover_poly = -1
+	_hover_vert = -1
 	queue_redraw()
 
 
@@ -73,9 +80,7 @@ func set_in_progress(arr: PackedVector2Array) -> void:
 func set_current_tool(tool_id: int) -> void:
 	current_tool = tool_id
 	match tool_id:
-		TOOL_ERASER:
-			mouse_default_cursor_shape = Control.CURSOR_CROSS
-		TOOL_RED, TOOL_YELLOW:
+		TOOL_ERASER, TOOL_RED, TOOL_YELLOW:
 			mouse_default_cursor_shape = Control.CURSOR_CROSS
 		_:
 			mouse_default_cursor_shape = Control.CURSOR_ARROW
@@ -87,10 +92,6 @@ func set_highlighted(idx: int) -> void:
 	queue_redraw()
 
 
-# Image-px (top-left origin, +X right, +Y down) ↔ Control-local screen px.
-# The image is centered in the Control rect and scaled by `zoom`.
-# image_px = (local - centering_offset) / zoom
-# centering_offset = (control_size - image_size * zoom) / 2
 func control_to_image_px(local: Vector2) -> Vector2:
 	var img_screen := image_size * zoom
 	var top_left := (size - img_screen) * 0.5
@@ -110,18 +111,57 @@ func is_image_px_inside(img_px: Vector2) -> bool:
 		and img_px.x <= image_size.x and img_px.y <= image_size.y
 
 
+func _find_nearest_vertex(screen_pos: Vector2) -> Vector2i:
+	var best_dist := VERTEX_HIT_RADIUS + 1.0
+	var best := Vector2i(-1, -1)
+	for pi in range(polygons.size()):
+		var verts: PackedVector2Array = polygons[pi].get("vertices", PackedVector2Array())
+		for vi in range(verts.size()):
+			var sp := image_px_to_control(verts[vi])
+			var d := screen_pos.distance_to(sp)
+			if d < best_dist:
+				best_dist = d
+				best = Vector2i(pi, vi)
+	return best
+
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
-		_local_mouse = (event as InputEventMouseMotion).position
+		var mm := event as InputEventMouseMotion
+		_local_mouse = mm.position
 		_mouse_inside = true
 		var img_px := control_to_image_px(_local_mouse)
 		mouse_moved.emit(img_px, is_image_px_inside(img_px))
-		queue_redraw()
+
+		if _drag_active:
+			_drag_current_pos = img_px.clamp(Vector2.ZERO, image_size)
+			queue_redraw()
+			accept_event()
+			return
+
+		if current_tool == TOOL_NONE:
+			var nearest := _find_nearest_vertex(_local_mouse)
+			if nearest.x != _hover_poly or nearest.y != _hover_vert:
+				_hover_poly = nearest.x
+				_hover_vert = nearest.y
+				queue_redraw()
 		return
+
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
+
+		if mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed and _drag_active:
+			_drag_active = false
+			vertex_dragged.emit(_drag_poly, _drag_vert, _drag_current_pos)
+			_drag_poly = -1
+			_drag_vert = -1
+			mouse_default_cursor_shape = Control.CURSOR_ARROW
+			accept_event()
+			return
+
 		if not mb.pressed:
 			return
+
 		match mb.button_index:
 			MOUSE_BUTTON_WHEEL_UP:
 				zoom_step.emit(1)
@@ -130,6 +170,17 @@ func _gui_input(event: InputEvent) -> void:
 				zoom_step.emit(-1)
 				accept_event()
 			MOUSE_BUTTON_LEFT:
+				if current_tool == TOOL_NONE and polygons.size() > 0:
+					var nearest := _find_nearest_vertex(mb.position)
+					if nearest.x >= 0:
+						_drag_poly = nearest.x
+						_drag_vert = nearest.y
+						_drag_active = true
+						_drag_current_pos = control_to_image_px(mb.position).clamp(Vector2.ZERO, image_size)
+						mouse_default_cursor_shape = Control.CURSOR_DRAG
+						accept_event()
+						return
+
 				var img_px := control_to_image_px(mb.position)
 				if not is_image_px_inside(img_px):
 					return
@@ -146,6 +197,8 @@ func _gui_input(event: InputEvent) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_MOUSE_EXIT:
 		_mouse_inside = false
+		_hover_poly = -1
+		_hover_vert = -1
 		queue_redraw()
 
 
@@ -161,7 +214,6 @@ func _draw() -> void:
 
 
 func _draw_checker_background() -> void:
-	# Dark fill first, then checker overlay (cheap; preview area is small).
 	draw_rect(Rect2(Vector2.ZERO, size), CHECKER_A, true)
 	var cs := CHECKER_SIZE_PX
 	var cols := int(ceil(size.x / cs))
@@ -169,8 +221,7 @@ func _draw_checker_background() -> void:
 	for row in range(rows):
 		for col in range(cols):
 			if (row + col) % 2 == 1:
-				var r := Rect2(Vector2(col, row) * cs, Vector2(cs, cs))
-				draw_rect(r, CHECKER_B, true)
+				draw_rect(Rect2(Vector2(col, row) * cs, Vector2(cs, cs)), CHECKER_B, true)
 
 
 func _draw_polygons() -> void:
@@ -180,19 +231,35 @@ func _draw_polygons() -> void:
 		if verts.size() < 3:
 			continue
 		var col := _color_for_type(p.get("type", "collision"))
+
 		var screen_verts := PackedVector2Array()
-		for v in verts:
-			screen_verts.append(image_px_to_control(v))
+		for vi in range(verts.size()):
+			var sv := image_px_to_control(verts[vi])
+			if _drag_active and i == _drag_poly and vi == _drag_vert:
+				sv = image_px_to_control(_drag_current_pos)
+			screen_verts.append(sv)
+
 		var fill := col
 		fill.a = FILL_ALPHA
 		draw_colored_polygon(screen_verts, fill)
+
 		var outline_w := OUTLINE_WIDTH_PX * (2.0 if i == highlighted_index else 1.0)
-		# draw_polyline doesn't auto-close — append first point.
 		var closed := PackedVector2Array(screen_verts)
 		closed.append(screen_verts[0])
 		draw_polyline(closed, col, outline_w, true)
-		for v in screen_verts:
-			draw_circle(v, VERTEX_RADIUS_PX, col)
+
+		for vi in range(screen_verts.size()):
+			var sv := screen_verts[vi]
+			var is_drag := _drag_active and i == _drag_poly and vi == _drag_vert
+			var is_hover := not _drag_active and i == _hover_poly and vi == _hover_vert
+			if is_drag:
+				draw_circle(sv, VERTEX_RADIUS_PX * 2.2, COLOR_HOVER)
+				draw_circle(sv, VERTEX_RADIUS_PX * 1.4, col)
+			elif is_hover:
+				draw_circle(sv, VERTEX_RADIUS_PX * 1.8, COLOR_HOVER)
+				draw_circle(sv, VERTEX_RADIUS_PX, col)
+			else:
+				draw_circle(sv, VERTEX_RADIUS_PX, col)
 
 
 func _draw_in_progress() -> void:
@@ -208,7 +275,6 @@ func _draw_in_progress() -> void:
 		draw_polyline(screen_verts, col, OUTLINE_WIDTH_PX, true)
 	for v in screen_verts:
 		draw_circle(v, VERTEX_RADIUS_PX, col)
-	# Rubber-band line from last placed vertex to current cursor (dashed-ish).
 	if _mouse_inside and screen_verts.size() > 0:
 		var last := screen_verts[screen_verts.size() - 1]
 		var ghost := col
@@ -226,16 +292,11 @@ func _draw_empty_hint() -> void:
 
 
 func _color_for_type(t: String) -> Color:
-	if t == "recognition":
-		return COLOR_RECOGNITION
-	return COLOR_COLLISION
+	return COLOR_RECOGNITION if t == "recognition" else COLOR_COLLISION
 
 
 func _color_for_tool(tool_id: int) -> Color:
 	match tool_id:
-		TOOL_RED:
-			return COLOR_COLLISION
-		TOOL_YELLOW:
-			return COLOR_RECOGNITION
-		_:
-			return Color(0, 0, 0, 0)
+		TOOL_RED: return COLOR_COLLISION
+		TOOL_YELLOW: return COLOR_RECOGNITION
+		_: return Color(0, 0, 0, 0)

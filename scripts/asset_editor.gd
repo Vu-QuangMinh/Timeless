@@ -33,6 +33,7 @@ const SHORTCUTS := [
 	{"category": "View",    "key": "Mouse Wheel",  "desc": "Adjust zoom"},
 	{"category": "File",    "key": "Ctrl+S",       "desc": "Save asset"},
 	{"category": "File",    "key": "Ctrl+O",       "desc": "Load asset"},
+	{"category": "Edit",    "key": "Ctrl+Z",       "desc": "Undo"},
 	{"category": "Mode",    "key": "F6",           "desc": "Toggle Asset Editor"},
 ]
 
@@ -90,6 +91,13 @@ var _asset_browser: ConfirmationDialog = null
 var _asset_browser_list: ItemList = null
 var _asset_browser_entries: Array = []  # [{category, name, json_path}]
 
+# Undo / auto-trace / asset list
+var _undo_stack: Array = []
+var _current_json_path: String = ""
+var _pending_exit_after_save: bool = false
+var _asset_list_box: VBoxContainer = null
+var _asset_entries_right: Array = []
+
 
 func _ready() -> void:
 	set_process(false)
@@ -128,10 +136,13 @@ func _build_ui() -> void:
 	root_v.add_child(_build_status_bar())
 
 	_exit_confirm = ConfirmationDialog.new()
-	_exit_confirm.title = "Unsaved borders"
-	_exit_confirm.dialog_text = "Discard unsaved borders?"
-	_exit_confirm.ok_button_text = "Discard"
-	_exit_confirm.confirmed.connect(_on_exit_discard)
+	_exit_confirm.title = "Unsaved Changes"
+	_exit_confirm.dialog_text = "You have unsaved changes."
+	_exit_confirm.ok_button_text = "Save & Exit"
+	_exit_confirm.get_cancel_button().text = "Cancel"
+	_exit_confirm.add_button("Discard", false, "discard")
+	_exit_confirm.confirmed.connect(_on_exit_save_pressed)
+	_exit_confirm.custom_action.connect(_on_exit_custom_action)
 	_ui_layer.add_child(_exit_confirm)
 
 	_load_dialog = FileDialog.new()
@@ -282,6 +293,34 @@ func _build_left_toolbar() -> Control:
 
 	v.add_child(HSeparator.new())
 
+	var reset_red_btn := Button.new()
+	reset_red_btn.text = "Reset Red"
+	reset_red_btn.tooltip_text = "Auto-trace collision polygon from image alpha"
+	reset_red_btn.add_theme_color_override("font_color", PreviewScript.COLOR_COLLISION)
+	reset_red_btn.pressed.connect(_reset_red_to_default)
+	v.add_child(reset_red_btn)
+
+	var reset_yellow_btn := Button.new()
+	reset_yellow_btn.text = "Reset Yellow"
+	reset_yellow_btn.tooltip_text = "Expand collision polygon outward 10px for recognition"
+	reset_yellow_btn.add_theme_color_override("font_color", PreviewScript.COLOR_RECOGNITION)
+	reset_yellow_btn.pressed.connect(_reset_yellow_to_default)
+	v.add_child(reset_yellow_btn)
+
+	v.add_child(HSeparator.new())
+
+	var undo_btn := Button.new()
+	undo_btn.text = "Undo"
+	undo_btn.tooltip_text = "Undo last change (Ctrl+Z)"
+	undo_btn.pressed.connect(_undo)
+	v.add_child(undo_btn)
+
+	var save_btn := Button.new()
+	save_btn.text = "Save"
+	save_btn.tooltip_text = "Save asset (Ctrl+S)"
+	save_btn.pressed.connect(_open_save_dialog)
+	v.add_child(save_btn)
+
 	var cancel_btn := Button.new()
 	cancel_btn.text = "Cancel"
 	cancel_btn.tooltip_text = "Cancel current polygon (Esc)"
@@ -312,6 +351,7 @@ func _build_preview() -> Control:
 	_preview.eraser_clicked.connect(_on_eraser_clicked)
 	_preview.mouse_moved.connect(_on_preview_mouse_moved)
 	_preview.zoom_step.connect(_on_zoom_step)
+	_preview.vertex_dragged.connect(_on_vertex_dragged)
 	return _preview
 
 
@@ -350,24 +390,50 @@ func _build_right_panel() -> Control:
 
 	v.add_child(HSeparator.new())
 
-	var poly_header := Label.new()
-	poly_header.text = "Polygons"
-	poly_header.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
-	v.add_child(poly_header)
+	# TabContainer: Polygons | Assets
+	var tabs := TabContainer.new()
+	tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tabs.add_theme_constant_override("side_margin", 2)
+	v.add_child(tabs)
+
+	# ── Tab 0: Polygons ────────────────────────────────
+	var poly_tab := VBoxContainer.new()
+	poly_tab.name = "Polygons"
+	poly_tab.add_theme_constant_override("separation", 2)
+	tabs.add_child(poly_tab)
 
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	v.add_child(scroll)
+	poly_tab.add_child(scroll)
 	_polygon_list_box = VBoxContainer.new()
 	_polygon_list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_polygon_list_box.add_theme_constant_override("separation", 2)
 	scroll.add_child(_polygon_list_box)
 
-	# Always-visible shortcut help, sits below the polygon list. (F6's UI fully
-	# tiles the screen so a floating bottom-right corner conflicts with the
-	# status bar; integrating into the right panel keeps it visible without
-	# obscuring the preview.)
+	# ── Tab 1: Assets ──────────────────────────────────
+	var asset_tab := VBoxContainer.new()
+	asset_tab.name = "Assets"
+	asset_tab.add_theme_constant_override("separation", 4)
+	tabs.add_child(asset_tab)
+
+	var refresh_row := HBoxContainer.new()
+	asset_tab.add_child(refresh_row)
+	var refresh_btn := Button.new()
+	refresh_btn.text = "Refresh"
+	refresh_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	refresh_btn.pressed.connect(_refresh_asset_list_panel)
+	refresh_row.add_child(refresh_btn)
+
+	var asset_scroll := ScrollContainer.new()
+	asset_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	asset_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	asset_tab.add_child(asset_scroll)
+	_asset_list_box = VBoxContainer.new()
+	_asset_list_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_asset_list_box.add_theme_constant_override("separation", 2)
+	asset_scroll.add_child(_asset_list_box)
+
 	v.add_child(HSeparator.new())
 	var help := ShortcutPanelBuilder.build("F6 Shortcuts", SHORTCUTS)
 	help.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -449,6 +515,7 @@ func _close_polygon() -> void:
 	var poly_type := _type_for_tool(_current_tool)
 	if poly_type == "":
 		return
+	_push_undo_snapshot()
 	_polygons.append({"type": poly_type, "vertices": PackedVector2Array(_in_progress)})
 	_in_progress = PackedVector2Array()
 	_preview.set_in_progress(_in_progress)
@@ -480,6 +547,7 @@ func _on_eraser_clicked(image_px: Vector2) -> void:
 func _delete_polygon(idx: int) -> void:
 	if idx < 0 or idx >= _polygons.size():
 		return
+	_push_undo_snapshot()
 	_polygons.remove_at(idx)
 	if _highlighted_index == idx:
 		_highlighted_index = -1
@@ -646,11 +714,12 @@ func _try_restore_sibling_borders(png_path: String) -> bool:
 	_polygons = loaded
 	_preview.set_polygons(_polygons)
 	_refresh_polygon_list()
+	_dirty = false
 	_set_status_message("Loaded: %s + %d border%s" % [png_path.get_file(), loaded.size(), "" if loaded.size() == 1 else "s"], false)
 	return true
 
 
-func _load_png(path: String) -> void:
+func _load_png(path: String, auto_trace: bool = true) -> void:
 	var img := Image.new()
 	var err := img.load(path)
 	if err != OK:
@@ -664,12 +733,15 @@ func _load_png(path: String) -> void:
 	_polygons.clear()
 	_in_progress = PackedVector2Array()
 	_highlighted_index = -1
+	_undo_stack.clear()
 	_preview.set_texture(tex)
 	_preview.set_polygons(_polygons)
 	_preview.set_in_progress(_in_progress)
 	_preview.set_highlighted(_highlighted_index)
 	_refresh_polygon_list()
 	_update_status_bar()
+	if auto_trace:
+		_auto_trace_contours()
 
 
 # ── Mode lifecycle ──────────────────────────────────────────────────────────
@@ -713,6 +785,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				if event.ctrl_pressed:
 					_open_asset_browser()
 					get_viewport().set_input_as_handled()
+			KEY_Z:
+				if event.ctrl_pressed:
+					_undo()
+					get_viewport().set_input_as_handled()
 
 
 func _mark_dirty() -> void:
@@ -742,6 +818,7 @@ func _toggle() -> void:
 	set_process(true)
 	if _root_panel:
 		_root_panel.visible = true
+	_refresh_asset_list_panel()
 
 
 func _force_deactivate() -> void:
@@ -809,6 +886,9 @@ func _on_save_dialog_confirmed() -> void:
 		return
 	_dirty = false
 	_set_status_message("Saved: %s/%s" % [category, asset_name], false)
+	if _pending_exit_after_save:
+		_pending_exit_after_save = false
+		_force_deactivate()
 
 
 func _save_asset(asset_name: String, category: String, with_normal: bool) -> String:
@@ -1113,7 +1193,7 @@ func _load_asset(json_path: String) -> void:
 	if img_name == "":
 		_set_status_message("borders.json has no image field", true)
 		return
-	_load_png("%s/%s" % [dir, img_name])
+	_load_png("%s/%s" % [dir, img_name], false)
 	# _load_png clears polygons; now restore from the JSON.
 	var loaded: Array = []
 	var raw_polys: Variant = parsed.get("polygons", [])
@@ -1132,4 +1212,255 @@ func _load_asset(json_path: String) -> void:
 	_preview.set_polygons(_polygons)
 	_refresh_polygon_list()
 	_dirty = false
+	_current_json_path = json_path
 	_set_status_message("Loaded: %s" % json_path.get_file(), false)
+
+
+# ── Undo ─────────────────────────────────────────────────────────────────────
+
+func _push_undo_snapshot() -> void:
+	var snapshot: Array = []
+	for p in _polygons:
+		var verts := PackedVector2Array(p.get("vertices", PackedVector2Array()))
+		snapshot.append({"type": String(p.get("type", "collision")), "vertices": verts})
+	_undo_stack.append(snapshot)
+	if _undo_stack.size() > 30:
+		_undo_stack.pop_front()
+
+
+func _undo() -> void:
+	if _undo_stack.is_empty():
+		_set_status_message("Nothing to undo", false)
+		return
+	_polygons = _undo_stack.pop_back()
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_mark_dirty()
+	_update_status_bar()
+
+
+# ── Auto-contour ─────────────────────────────────────────────────────────────
+
+func _auto_trace_contours() -> void:
+	if _image == null:
+		return
+	var red_poly := _trace_opaque_boundary(_image)
+	var yellow_poly := _expand_polygon(red_poly, 10.0)
+	_polygons.clear()
+	if red_poly.size() >= 3:
+		_polygons.append({"type": "collision", "vertices": red_poly})
+	if yellow_poly.size() >= 3:
+		_polygons.append({"type": "recognition", "vertices": yellow_poly})
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_mark_dirty()
+
+
+func _reset_red_to_default() -> void:
+	if _image == null:
+		_set_status_message("Load a PNG first", true)
+		return
+	_push_undo_snapshot()
+	var red_poly := _trace_opaque_boundary(_image)
+	if red_poly.size() < 3:
+		return
+	var new_polys: Array = []
+	var replaced := false
+	for p in _polygons:
+		if not replaced and String(p.get("type", "")) == "collision":
+			new_polys.append({"type": "collision", "vertices": red_poly})
+			replaced = true
+		else:
+			new_polys.append(p)
+	if not replaced:
+		new_polys.insert(0, {"type": "collision", "vertices": red_poly})
+	_polygons = new_polys
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_mark_dirty()
+
+
+func _reset_yellow_to_default() -> void:
+	if _image == null:
+		_set_status_message("Load a PNG first", true)
+		return
+	var red_verts: Variant = null
+	for p in _polygons:
+		if String(p.get("type", "")) == "collision":
+			red_verts = p.get("vertices", PackedVector2Array())
+			break
+	if red_verts == null or (red_verts as PackedVector2Array).size() < 3:
+		_set_status_message("No red polygon to expand from", true)
+		return
+	_push_undo_snapshot()
+	var yellow_poly := _expand_polygon(red_verts as PackedVector2Array, 10.0)
+	if yellow_poly.size() < 3:
+		return
+	var new_polys: Array = []
+	var replaced := false
+	for p in _polygons:
+		if not replaced and String(p.get("type", "")) == "recognition":
+			new_polys.append({"type": "recognition", "vertices": yellow_poly})
+			replaced = true
+		else:
+			new_polys.append(p)
+	if not replaced:
+		new_polys.append({"type": "recognition", "vertices": yellow_poly})
+	_polygons = new_polys
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_mark_dirty()
+
+
+func _trace_opaque_boundary(img: Image) -> PackedVector2Array:
+	var w: int = img.get_width()
+	var h: int = img.get_height()
+	const ALPHA_THRESH: float = 0.04
+
+	var col_top := PackedInt32Array(); col_top.resize(w); col_top.fill(-1)
+	var col_bot := PackedInt32Array(); col_bot.resize(w); col_bot.fill(-1)
+	var row_left := PackedInt32Array(); row_left.resize(h); row_left.fill(-1)
+	var row_right := PackedInt32Array(); row_right.resize(h); row_right.fill(-1)
+
+	for y in range(h):
+		for x in range(w):
+			if img.get_pixel(x, y).a >= ALPHA_THRESH:
+				if col_top[x] < 0: col_top[x] = y
+				col_bot[x] = y
+				if row_left[y] < 0: row_left[y] = x
+				row_right[y] = x
+
+	var pts := PackedVector2Array()
+	# Top edge: left→right
+	for x in range(w):
+		if col_top[x] >= 0:
+			pts.append(Vector2(float(x) + 0.5, float(col_top[x])))
+	# Right edge: top→bottom
+	for y in range(h):
+		if row_right[y] >= 0:
+			pts.append(Vector2(float(row_right[y]) + 1.0, float(y) + 0.5))
+	# Bottom edge: right→left
+	for x in range(w - 1, -1, -1):
+		if col_bot[x] >= 0:
+			pts.append(Vector2(float(x) + 0.5, float(col_bot[x]) + 1.0))
+	# Left edge: bottom→top
+	for y in range(h - 1, -1, -1):
+		if row_left[y] >= 0:
+			pts.append(Vector2(float(row_left[y]), float(y) + 0.5))
+
+	if pts.size() < 3:
+		return pts
+	return _simplify_poly_collinear(pts, 2.0)
+
+
+func _simplify_poly_collinear(pts: PackedVector2Array, epsilon: float) -> PackedVector2Array:
+	var n := pts.size()
+	if n < 3:
+		return pts
+	var out := PackedVector2Array()
+	for i in range(n):
+		var prev := pts[(i - 1 + n) % n]
+		var curr := pts[i]
+		var next := pts[(i + 1) % n]
+		if _dist_pt_seg(curr, prev, next) >= epsilon:
+			out.append(curr)
+	return out if out.size() >= 3 else pts
+
+
+func _dist_pt_seg(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var len2 := ab.length_squared()
+	if len2 < 0.0001:
+		return p.distance_to(a)
+	var t := clampf((p - a).dot(ab) / len2, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
+
+
+func _expand_polygon(verts: PackedVector2Array, amount: float) -> PackedVector2Array:
+	if verts.size() < 3:
+		return PackedVector2Array()
+	var results := Geometry2D.offset_polygon(verts, amount)
+	if results.is_empty():
+		return PackedVector2Array()
+	var best := PackedVector2Array()
+	var best_area := 0.0
+	for poly in results:
+		var pv: PackedVector2Array = poly
+		var area := abs(_signed_area(pv))
+		if area > best_area:
+			best_area = area
+			best = pv
+	return best
+
+
+func _signed_area(verts: PackedVector2Array) -> float:
+	var area := 0.0
+	var n := verts.size()
+	for i in range(n):
+		var j := (i + 1) % n
+		area += verts[i].x * verts[j].y - verts[j].x * verts[i].y
+	return area * 0.5
+
+
+# ── Vertex drag callback ─────────────────────────────────────────────────────
+
+func _on_vertex_dragged(poly_idx: int, vert_idx: int, new_pos: Vector2) -> void:
+	if poly_idx < 0 or poly_idx >= _polygons.size():
+		return
+	var verts: PackedVector2Array = _polygons[poly_idx].get("vertices", PackedVector2Array())
+	if vert_idx < 0 or vert_idx >= verts.size():
+		return
+	_push_undo_snapshot()
+	verts[vert_idx] = new_pos
+	_polygons[poly_idx]["vertices"] = verts
+	_preview.set_polygons(_polygons)
+	_refresh_polygon_list()
+	_mark_dirty()
+
+
+# ── Exit dialog (3 buttons) ──────────────────────────────────────────────────
+
+func _on_exit_save_pressed() -> void:
+	_pending_exit_after_save = true
+	_open_save_dialog()
+
+
+func _on_exit_custom_action(action: StringName) -> void:
+	if action == "discard":
+		_on_exit_discard()
+
+
+# ── Right panel asset list ───────────────────────────────────────────────────
+
+func _refresh_asset_list_panel() -> void:
+	if _asset_list_box == null:
+		return
+	for c in _asset_list_box.get_children():
+		c.queue_free()
+	_asset_entries_right = _scan_palette()
+	if _asset_entries_right.is_empty():
+		var lbl := Label.new()
+		lbl.text = "(no saved assets)"
+		lbl.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+		lbl.add_theme_font_size_override("font_size", 11)
+		_asset_list_box.add_child(lbl)
+		return
+	for entry in _asset_entries_right:
+		var btn := Button.new()
+		btn.text = "[%s]  %s" % [String(entry.get("category", "")), String(entry.get("name", ""))]
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.add_theme_font_size_override("font_size", 11)
+		btn.pressed.connect(_on_asset_list_entry_pressed.bind(entry))
+		_asset_list_box.add_child(btn)
+
+
+func _on_asset_list_entry_pressed(entry: Dictionary) -> void:
+	var json_path: String = String(entry.get("json_path", ""))
+	if json_path == "":
+		return
+	if _dirty:
+		_pending_load_path = json_path
+		_load_discard_confirm.popup_centered()
+		return
+	_load_asset(json_path)

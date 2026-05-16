@@ -11,6 +11,7 @@ var _selected_idx: int = 0
 var _path_preview: PathPreview
 var _context_menu: ContextMenu
 var _hud: HUD
+var _hud_editor: HUDEditor
 
 var _input_locked: bool = false
 
@@ -47,6 +48,10 @@ func _ready() -> void:
 	add_child(_hud)
 	_hud.commit_pressed.connect(_on_commit_pressed)
 
+	_hud_editor = HUDEditor.new()
+	add_child(_hud_editor)
+	_hud_editor.init(_hud)
+
 	GameManager.start_mission(60.0)
 	GameManager.mission_ended.connect(_on_mission_ended)
 
@@ -54,7 +59,7 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if _input_locked:
+	if _input_locked or (_hud_editor != null and _hud_editor.active):
 		return
 
 	if event is InputEventKey and event.pressed and not event.echo:
